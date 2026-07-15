@@ -1,0 +1,7 @@
+.moderator-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.moderator-grid article { display: grid; gap: 5px; padding: 13px; border: 1px solid #e1e8e1; border-radius: 11px; background: #f9fbf8; }
+.moderator-grid article b { color: #6346d3; }
+.moderator-grid article strong { font-size: 13px; }
+.moderator-grid article span { width: fit-content; padding: 3px 7px; border-radius: 20px; background: #e5f8da; color: #42712f; font-size: 10px; font-weight: 700; }
+.moderator-grid article small { color: #718078; line-height: 1.4; }
+@media (max-width: 800px) { .moderator-grid { grid-template-columns: 1fr; } }

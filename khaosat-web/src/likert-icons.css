@@ -1,0 +1,14 @@
+.scenario-card h2 { color: #24332c; line-height: 1.55; }
+.scenario-card h2 mark { padding: 1px 5px; color: #6447cf; background: linear-gradient(120deg, #eee8ff, #e7ffd2); border-radius: 6px; font-weight: 800; }
+.scenario-card { padding: 22px 24px; border-left: 0; border-radius: 20px; background: linear-gradient(135deg, #fff, #f7fbf4); box-shadow: 0 10px 35px #264b3410; }
+.scenario-card:before { content: ''; position: absolute; inset: 0 auto 0 0; width: 5px; border-radius: 20px 0 0 20px; background: linear-gradient(#bdf469,#8064e9); }
+.kind-likert .scenario-card { text-align: center; padding: 22px; background: transparent; box-shadow: none; }
+.kind-likert .scenario-card:before,.kind-likert .quote-mark { display: none; }
+.likert-guide { grid-column: 1 / -1; text-align: center; color: #65736c; font-size: 13px; font-weight: 700; margin-bottom: 8px; }
+.options.likert { grid-template-columns: repeat(5, minmax(54px, 82px)); justify-content: center; gap: 16px; padding-top: 0; }
+.options.likert button.emoji-choice { display: grid; place-items: center; min-width: 0; width: 76px; height: 76px; padding: 0; border: 0; border-radius: 50%; background: transparent; box-shadow: none; transform: none; }
+.options.likert button.emoji-choice:hover { background: #edffd8; transform: scale(1.16) rotate(-3deg); box-shadow: 0 10px 28px #4c73331c; }
+.options.likert button.emoji-choice:focus-visible { outline: 3px solid #8064e9; outline-offset: 4px; }
+.emoji-only { display: block; font-size: 43px; line-height: 1; filter: saturate(.9); transition: transform .18s; }
+.emoji-choice:hover .emoji-only { transform: scale(1.08); }
+@media(max-width:600px){.scenario-card{padding:18px 17px}.scenario-card h2{font-size:19px}.options.likert{gap:5px;grid-template-columns:repeat(5,1fr)}.options.likert button.emoji-choice{width:58px;height:58px}.emoji-only{font-size:35px}.likert-guide{font-size:12px}}

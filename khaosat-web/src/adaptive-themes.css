@@ -1,0 +1,34 @@
+/* Theme is chosen at P01c and follows the respondent to the result page. */
+.question-page .question-meta span{color:var(--pink-dark);background:var(--blush-2)}
+.question-page .options button>b{color:var(--pink-dark);background:var(--blush)}
+.question-page .options button{border-color:var(--blush-2)}
+.question-page .options button:hover{border-color:var(--pink)}
+.question-page .options button:hover>b{color:#fff;background:var(--pink)}
+.question-page .options button:hover>i{color:var(--pink-dark)}
+.question-page .context-memory{color:var(--plum);background:var(--blush)}
+.question-page .context-memory small{color:var(--pink-dark)}
+.question-page .chapter-copy,.persona-page>.eyebrow{color:var(--pink-dark)}
+.question-page .reaction-pop,.kind-transition .options button{background:var(--plum)}
+.persona-page .persona-card{background:var(--plum)}
+.persona-page .persona-kicker,.persona-page .trait-list header strong{color:var(--blush-2)}
+.persona-page .advice-card p b{color:var(--pink-dark)}
+.persona-page .restart{color:var(--plum)!important;background:var(--blush-2)!important}
+[data-survey-theme="mint"] .question-page,[data-survey-theme="mint"] .finish.persona-page{--pink:#54b99b;--pink-dark:#287c68;--blush:#eefaf6;--blush-2:#d9f4eb;--plum:#3f4f49;background:radial-gradient(circle at 50% 8%,#dcf7ee,transparent 32%),#fcfffe}
+[data-survey-theme="mint"] .progress i,[data-survey-theme="mint"] .scenario-card:before,[data-survey-theme="mint"] .trait-list>div>span i{background:#54b99b}[data-survey-theme="mint"] .scenario-card h2 mark,[data-survey-theme="mint"] .chapter-copy{color:#287c68}[data-survey-theme="mint"] .context-memory{background:#e8f8f2;color:#315f53}
+[data-survey-theme="sunset"] .question-page,[data-survey-theme="sunset"] .finish.persona-page{--pink:#f27855;--pink-dark:#bd4d31;--blush:#fff3ed;--blush-2:#ffe1d4;--plum:#633d39;background:radial-gradient(circle at 50% 8%,#ffe1d3,transparent 32%),#fffdfb}
+[data-survey-theme="sunset"] .progress i,[data-survey-theme="sunset"] .scenario-card:before,[data-survey-theme="sunset"] .trait-list>div>span i{background:#f27855}[data-survey-theme="sunset"] .scenario-card h2 mark,[data-survey-theme="sunset"] .chapter-copy{color:#bd4d31}[data-survey-theme="sunset"] .context-memory{background:#fff0e9;color:#75463a}
+[data-survey-theme="lavender"] .question-page,[data-survey-theme="lavender"] .finish.persona-page{--pink:#9973d6;--pink-dark:#6946a4;--blush:#f7f1ff;--blush-2:#eadfff;--plum:#49365e;background:radial-gradient(circle at 50% 8%,#eadfff,transparent 32%),#fefcff}
+[data-survey-theme="lavender"] .progress i,[data-survey-theme="lavender"] .scenario-card:before,[data-survey-theme="lavender"] .trait-list>div>span i{background:#9973d6}[data-survey-theme="lavender"] .scenario-card h2 mark,[data-survey-theme="lavender"] .chapter-copy{color:#6946a4}[data-survey-theme="lavender"] .context-memory{background:#f1eaff;color:#584277}
+.kind-theme .options button:nth-child(1){border-color:#f19ab8}.kind-theme .options button:nth-child(2){border-color:#7bcab2}.kind-theme .options button:nth-child(3){border-color:#ef987c}.kind-theme .options button:nth-child(4){border-color:#ab8bdc}.kind-theme .options button{font-weight:700}.kind-transition .scenario-card{text-align:center;border:0;background:transparent;box-shadow:none;padding:35px 20px}.kind-transition .scenario-card:before,.kind-transition .quote-mark{display:none}.kind-transition .scenario-card h2{font-size:28px;color:var(--plum)}.kind-transition .options{max-width:320px;margin:auto}.kind-transition .options button{display:flex;justify-content:center;background:var(--plum);color:white;border:0}.kind-transition .options button b,.kind-transition .options button i{display:none}
+
+/* The nickname and mood picker always use the base pink palette. */
+[data-survey-theme] .question-page.kind-text,
+[data-survey-theme] .question-page.kind-theme{
+  --pink:#f45b8d;
+  --pink-dark:#cf3f72;
+  --blush:#fff0f5;
+  --blush-2:#ffe1eb;
+  --plum:#573451;
+  --plum-soft:#76506f;
+  background:linear-gradient(145deg,#fffdfd,#fff7fa);
+}

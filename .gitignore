@@ -1,0 +1,46 @@
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Environment and credentials (examples remain tracked)
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+*service-account*.json
+*firebase-adminsdk*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Backend runtime data
+khaosat-api/survey.db
+khaosat-api/survey.db-*
+khaosat-api/backups/*
+khaosat-api/media/*
+!khaosat-api/backups/.gitkeep
+!khaosat-api/media/.gitkeep
+
+# Frontend
+khaosat-web/node_modules/
+khaosat-web/dist/
+khaosat-web/*.tsbuildinfo
+khaosat-web/.vite/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+tmp/
