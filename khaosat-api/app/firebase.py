@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 
 import firebase_admin
@@ -10,15 +11,22 @@ def initialize_firebase():
     if firebase_admin._apps:
         return firebase_admin.get_app()
 
+    credential_json = os.getenv("FIREBASE_CREDENTIALS_JSON", "").strip()
     credential_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
-    if not credential_path:
+    if credential_json:
+        try:
+            certificate = credentials.Certificate(json.loads(credential_json))
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError("FIREBASE_CREDENTIALS_JSON không phải service-account JSON hợp lệ") from exc
+    elif credential_path:
+        path = Path(credential_path).expanduser()
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parents[1] / path
+        if not path.is_file():
+            raise RuntimeError(f"Không tìm thấy Firebase credential tại: {path}")
+        certificate = credentials.Certificate(path)
+    else:
         return None
-
-    path = Path(credential_path).expanduser()
-    if not path.is_absolute():
-        path = Path(__file__).resolve().parents[1] / path
-    if not path.is_file():
-        raise RuntimeError(f"Không tìm thấy Firebase credential tại: {path}")
 
     options = {}
     project_id = os.getenv("FIREBASE_PROJECT_ID", "").strip()
@@ -28,4 +36,4 @@ def initialize_firebase():
     if storage_bucket:
         options["storageBucket"] = storage_bucket
 
-    return firebase_admin.initialize_app(credentials.Certificate(path), options)
+    return firebase_admin.initialize_app(certificate, options)
