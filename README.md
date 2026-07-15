@@ -41,3 +41,12 @@ Backend tự import workbook ở lần chạy đầu. Có thể bấm **Đồng 
 - Excel vẫn là nguồn tài liệu gốc; bảng `excel_sheets` giữ JSON của mọi sheet, còn câu hỏi/biến được chuẩn hoá để vận hành động.
 
 Có thể đổi vị trí workbook khi triển khai bằng `SURVEY_WORKBOOK` và `CRITERIA_WORKBOOK`.
+
+## Deploy frontend lên Vercel
+
+1. Import repository và đặt **Root Directory** là `khaosat-web`.
+2. Thêm biến môi trường `VITE_API_BASE_URL=https://your-fastapi-domain.example/api` cho Production, Preview và Development nếu cần.
+3. Deploy; `vercel.json` đã cấu hình Vite build, thư mục `dist` và SPA rewrite cho `/admin`.
+4. Trong môi trường production của FastAPI, đặt `ALLOWED_ORIGINS` bằng domain Vercel thật. Có thể khai báo nhiều domain, phân tách bằng dấu phẩy.
+
+Firebase Admin và service-account chỉ thuộc backend; tuyệt đối không đưa service-account vào Vercel frontend variables.

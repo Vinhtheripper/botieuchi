@@ -13,6 +13,8 @@
 *.key
 *service-account*.json
 *firebase-adminsdk*.json
+**/serviceAccountKey.json
+**/*firebase*credentials*.json
 
 # Python
 __pycache__/
@@ -28,6 +30,7 @@ venv/
 # Backend runtime data
 khaosat-api/survey.db
 khaosat-api/survey.db-*
+khaosat-api/*.db
 khaosat-api/backups/*
 khaosat-api/media/*
 !khaosat-api/backups/.gitkeep
@@ -38,6 +41,7 @@ khaosat-web/node_modules/
 khaosat-web/dist/
 khaosat-web/*.tsbuildinfo
 khaosat-web/.vite/
+khaosat-web/.vercel/
 
 # Logs and temporary files
 *.log

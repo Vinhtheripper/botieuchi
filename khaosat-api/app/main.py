@@ -12,6 +12,8 @@ from .database import init_db, connect, rows, row, decode, DB_PATH
 from .excel_import import import_workbook
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+from .firebase import initialize_firebase
+
 ALLOWED_ORIGINS=[origin.strip() for origin in os.getenv("ALLOWED_ORIGINS","http://localhost:5173").split(",") if origin.strip()]
 app = FastAPI(title="GROUP2 Survey API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -56,6 +58,7 @@ async def rate_limit(request:Request,call_next):
 @app.on_event("startup")
 def startup():
     init_db()
+    initialize_firebase()
     if not row("SELECT id FROM admin_users LIMIT 1"):
         username=os.getenv("ADMIN_USERNAME","admin")
         password=os.getenv("ADMIN_PASSWORD","admin123")
