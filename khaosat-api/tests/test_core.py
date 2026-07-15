@@ -33,7 +33,9 @@ class SurveySecurityTests(unittest.TestCase):
     def test_answer_cannot_be_overwritten_or_sent_out_of_order(self):
         sid=self.new_session();q=next_question(sid)["question"]
         answer(sid,Answer(question_id=q["id"],option_id=q["options"][0]["id"],value="Tester"))
-        with self.assertRaises(HTTPException): answer(sid,Answer(question_id=q["id"],option_id=q["options"][0]["id"]))
+        replay=answer(sid,Answer(question_id=q["id"],option_id=q["options"][0]["id"],value="Tester"))
+        self.assertTrue(replay["replayed"])
+        with self.assertRaises(HTTPException): answer(sid,Answer(question_id=q["id"],option_id="B",value="Changed"))
         with self.assertRaises(HTTPException): answer(sid,Answer(question_id="Q18",option_id="A"))
 
     def test_question_timing_is_recorded(self):

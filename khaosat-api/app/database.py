@@ -1,9 +1,10 @@
 import json
+import os
 import sqlite3
 from pathlib import Path
 from contextlib import contextmanager
 
-DB_PATH = Path(__file__).resolve().parents[1] / "survey.db"
+DB_PATH = Path(os.getenv("DATABASE_PATH", Path(__file__).resolve().parents[1] / "survey.db")).expanduser()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -20,13 +21,28 @@ CREATE TABLE IF NOT EXISTS branch_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, s
 CREATE TABLE IF NOT EXISTS question_timing (respondent_id TEXT, question_id TEXT, shown_at TEXT NOT NULL, answered_at TEXT, duration_ms INTEGER, PRIMARY KEY(respondent_id,question_id));
 CREATE TABLE IF NOT EXISTS question_media (id INTEGER PRIMARY KEY AUTOINCREMENT, question_id TEXT NOT NULL, option_id TEXT, path TEXT NOT NULL, mime_type TEXT, original_name TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS team_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, content TEXT NOT NULL, author_id TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_questions_active_position ON questions(active, position);
+CREATE INDEX IF NOT EXISTS idx_respondents_status_started ON respondents(status, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_answers_respondent ON answers(respondent_id);
+CREATE INDEX IF NOT EXISTS idx_answers_question_option ON answers(question_id, option_id);
+CREATE INDEX IF NOT EXISTS idx_skipped_respondent ON skipped(respondent_id);
+CREATE INDEX IF NOT EXISTS idx_timing_respondent ON question_timing(respondent_id);
+CREATE INDEX IF NOT EXISTS idx_branches_target_active ON branch_rules(target_question, active);
+CREATE INDEX IF NOT EXISTS idx_media_question_option ON question_media(question_id, option_id);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_expiry ON admin_sessions(expires_at);
 """
 
 @contextmanager
 def connect():
-    con = sqlite3.connect(DB_PATH)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(DB_PATH, timeout=15)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys=ON")
+    con.execute("PRAGMA busy_timeout=15000")
+    con.execute("PRAGMA synchronous=NORMAL")
+    con.execute("PRAGMA temp_store=MEMORY")
+    con.execute("PRAGMA cache_size=-20000")
     try:
         yield con
         con.commit()
@@ -35,6 +51,8 @@ def connect():
 
 def init_db():
     with connect() as con:
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA wal_autocheckpoint=1000")
         con.executescript(SCHEMA)
         columns={x[1] for x in con.execute("PRAGMA table_info(respondents)")}
         if "theme" not in columns: con.execute("ALTER TABLE respondents ADD COLUMN theme TEXT DEFAULT 'rose'")

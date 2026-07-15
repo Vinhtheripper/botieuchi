@@ -5,6 +5,7 @@ from typing import Optional, Union
 from fastapi import FastAPI, HTTPException, Header, Response, Depends, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -13,14 +14,17 @@ from .excel_import import import_workbook
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 from .firebase import initialize_firebase
+from .storage import DuplicateAnswer, firestore_enabled, persist_answer, persist_session, persist_session_update, persist_skip, restore_projection
 
 ALLOWED_ORIGINS=[origin.strip() for origin in os.getenv("ALLOWED_ORIGINS","http://localhost:5173").split(",") if origin.strip()]
 app = FastAPI(title="GROUP2 Survey API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 MEDIA_DIR=Path(__file__).resolve().parents[1]/"media"; MEDIA_DIR.mkdir(exist_ok=True)
 BACKUP_DIR=Path(__file__).resolve().parents[1]/"backups"; BACKUP_DIR.mkdir(exist_ok=True)
 app.mount("/media",StaticFiles(directory=MEDIA_DIR),name="media")
 RATE_BUCKETS={}
+RATE_LAST_CLEANUP=0.0
 
 def now(): return datetime.now(timezone.utc).isoformat()
 def password_hash(password,salt=None):
@@ -47,18 +51,26 @@ def audit(user,action,resource,resource_id=None,detail=None,ip=None):
 
 @app.middleware("http")
 async def rate_limit(request:Request,call_next):
+    global RATE_BUCKETS, RATE_LAST_CLEANUP
     if request.url.path.startswith(("/api/sessions","/api/admin/login")):
-        key=(request.client.host if request.client else "unknown",request.url.path.split('/')[2:4][0])
-        current=time.time(); bucket=[x for x in RATE_BUCKETS.get(key,[]) if current-x<60]
-        limit=120 if "sessions" in request.url.path else 10
+        current=time.time();parts=request.url.path.strip('/').split('/')
+        ip=request.headers.get("x-forwarded-for","").split(',')[0].strip() or (request.client.host if request.client else "unknown")
+        if len(parts)>=3 and parts[1]=="sessions": key=("session",parts[2]);limit=120
+        elif parts[-1]=="login": key=("admin-login",ip);limit=10
+        else:key=("session-create",ip);limit=60
+        bucket=[x for x in RATE_BUCKETS.get(key,[]) if current-x<60]
         if len(bucket)>=limit:return Response(content='{"detail":"Thao tác quá nhanh, vui lòng thử lại sau"}',status_code=429,media_type="application/json")
         bucket.append(current);RATE_BUCKETS[key]=bucket
+        if current-RATE_LAST_CLEANUP>300:
+            RATE_BUCKETS={k:[x for x in values if current-x<60] for k,values in RATE_BUCKETS.items() if any(current-x<60 for x in values)}
+            RATE_LAST_CLEANUP=current
     return await call_next(request)
 
 @app.on_event("startup")
 def startup():
     init_db()
     initialize_firebase()
+    if firestore_enabled(): restore_projection()
     if not row("SELECT id FROM admin_users LIMIT 1"):
         username=os.getenv("ADMIN_USERNAME","admin")
         password=os.getenv("ADMIN_PASSWORD","admin123")
@@ -91,7 +103,9 @@ class Answer(BaseModel):
 @app.post("/api/sessions")
 def start(body: Start):
     sid = str(uuid.uuid4())
-    with connect() as con: con.execute("INSERT INTO respondents(id,name,email,consent,started_at,status) VALUES(?,?,?,?,?,?)",(sid,body.name,body.email,int(body.consent),now(),"active"))
+    created_at=now();record={"id":sid,"name":body.name,"email":body.email,"consent":bool(body.consent),"theme":"rose","started_at":created_at,"completed_at":None,"status":"active"}
+    persist_session(record)
+    with connect() as con: con.execute("INSERT INTO respondents(id,name,email,consent,theme,started_at,status) VALUES(?,?,?,?,?,?,?)",(sid,body.name,body.email,int(body.consent),"rose",created_at,"active"))
     return {"id": sid}
 
 def hydrated_question(q, respondent=None):
@@ -137,27 +151,27 @@ def public_question(q):
     safe.pop("note",None)
     return safe
 
-def should_skip(sid, q):
-    pilot=row("SELECT value FROM settings WHERE key='pilot_mode'")
-    if pilot and pilot["value"]=="true": return False
+def should_skip(sid, q, snapshot=None):
+    pilot=snapshot.get("pilot") if snapshot else row("SELECT value FROM settings WHERE key='pilot_mode'")
+    if pilot=="true" or (isinstance(pilot,dict) and pilot.get("value")=="true"): return False
     protected={"PRICE","PRIV","INFO","SCAM","PI"}; variables=q["variables"]
     # P00, AC1, piping và demographic không có biến hidden-scoring: luôn hiển thị.
     if not variables: return False
     if protected.intersection(variables): return False
-    answered=rows("SELECT scores_json FROM answers WHERE respondent_id=?",(sid,))
+    answered=snapshot.get("answers",[]) if snapshot else rows("SELECT scores_json FROM answers WHERE respondent_id=?",(sid,))
     scores={v:[] for v in variables}
     for a in answered:
         for k,v in json.loads(a["scores_json"] or "{}").items():
             if k in scores: scores[k].append(float(v))
     if not all(scores[v] and sum(scores[v])/len(scores[v]) >= 4 for v in variables): return False
-    previous=rows("SELECT variables_json FROM skipped WHERE respondent_id=?",(sid,))
+    previous=snapshot.get("skipped",[]) if snapshot else rows("SELECT variables_json FROM skipped WHERE respondent_id=?",(sid,))
     used={v for x in previous for v in json.loads(x["variables_json"])}
     return not used.intersection(variables)
 
-def branch_skips(sid,qid):
-    rules=rows("SELECT * FROM branch_rules WHERE target_question=? AND active=1",(qid,))
+def branch_skips(sid,qid,snapshot=None):
+    rules=[x for x in snapshot.get("branches",[]) if x["target_question"]==qid] if snapshot else rows("SELECT * FROM branch_rules WHERE target_question=? AND active=1",(qid,))
     for rule in rules:
-        source=row("SELECT option_id,value_json FROM answers WHERE respondent_id=? AND question_id=?",(sid,rule["source_question"]))
+        source=snapshot.get("answer_by_question",{}).get(rule["source_question"]) if snapshot else row("SELECT option_id,value_json FROM answers WHERE respondent_id=? AND question_id=?",(sid,rule["source_question"]))
         actual=source["option_id"] if source else None; match=str(actual)==rule["expected_value"]
         if rule["operator"]=="not_equals":match=not match
         if rule["action"]=="skip" and match:return True
@@ -168,25 +182,32 @@ def branch_skips(sid,qid):
 def next_question(sid: str):
     respondent=row("SELECT * FROM respondents WHERE id=?",(sid,))
     if not respondent: raise HTTPException(404,"Không tìm thấy phiên")
-    answered={x["question_id"] for x in rows("SELECT question_id FROM answers WHERE respondent_id=?",(sid,))}
-    skipped={x["question_id"] for x in rows("SELECT question_id FROM skipped WHERE respondent_id=?",(sid,))}
+    answer_rows=rows("SELECT question_id,option_id,value_json,scores_json FROM answers WHERE respondent_id=?",(sid,))
+    skip_rows=rows("SELECT question_id,variables_json FROM skipped WHERE respondent_id=?",(sid,))
+    answered={x["question_id"] for x in answer_rows}
+    skipped={x["question_id"] for x in skip_rows}
+    pilot=row("SELECT value FROM settings WHERE key='pilot_mode'")
+    snapshot={"answers":answer_rows,"skipped":skip_rows,"pilot":pilot["value"] if pilot else None,"branches":rows("SELECT * FROM branch_rules WHERE active=1"),"answer_by_question":{x["question_id"]:x for x in answer_rows}}
     questions=rows("SELECT * FROM questions WHERE active=1 ORDER BY position")
     total=len(questions)
     for raw in questions:
         if raw["id"] in answered or raw["id"] in skipped: continue
-        if branch_skips(sid,raw["id"]):
-            with connect() as con: con.execute("INSERT OR IGNORE INTO skipped VALUES(?,?,?,?,?)",(sid,raw["id"],"[]","Branch rule",now()))
+        if branch_skips(sid,raw["id"],snapshot):
+            skipped_at=now();persist_skip(sid,raw["id"],[],"Branch rule",skipped_at)
+            with connect() as con: con.execute("INSERT OR IGNORE INTO skipped VALUES(?,?,?,?,?)",(sid,raw["id"],"[]","Branch rule",skipped_at))
             continue
         q=hydrated_question(raw,respondent)
-        if should_skip(sid,q):
-            with connect() as con: con.execute("INSERT OR IGNORE INTO skipped VALUES(?,?,?,?,?)",(sid,q["id"],json.dumps(q["variables"]),"Điểm trung bình tích luỹ ≥ 4",now()))
+        if should_skip(sid,q,snapshot):
+            skipped_at=now();persist_skip(sid,q["id"],q["variables"],"Điểm trung bình tích luỹ ≥ 4",skipped_at)
+            with connect() as con: con.execute("INSERT OR IGNORE INTO skipped VALUES(?,?,?,?,?)",(sid,q["id"],json.dumps(q["variables"]),"Điểm trung bình tích luỹ ≥ 4",skipped_at))
             continue
         with connect() as con: con.execute("INSERT OR IGNORE INTO question_timing(respondent_id,question_id,shown_at) VALUES(?,?,?)",(sid,q["id"],now()))
         context=None
         if q["phase"] in ("Cá nhân hoá","Chuyển chặng","Mua lặp lại","Kết phiên","Nhân khẩu học"):
             context={"product":respondent.get("product"),"platform":respondent.get("platform"),"theme":respondent.get("theme") or "rose"}
         return {"done":False,"question":public_question(q),"progress":round((len(answered)+len(skipped))/total*100),"answered":len(answered),"total":total,"context":context}
-    with connect() as con: con.execute("UPDATE respondents SET completed_at=?,status='completed' WHERE id=?",(now(),sid))
+    completed_at=now();persist_session_update(sid,{"completed_at":completed_at,"status":"completed"})
+    with connect() as con: con.execute("UPDATE respondents SET completed_at=?,status='completed' WHERE id=?",(completed_at,sid))
     result=score_result(sid);result["name"]=respondent.get("name") if respondent.get("name") not in (None,"bạn","Ẩn danh") else None
     return {"done":True,"progress":100,"result":result}
 
@@ -195,7 +216,10 @@ def answer(sid: str, body: Answer):
     respondent=row("SELECT * FROM respondents WHERE id=?",(sid,))
     if not respondent: raise HTTPException(404,"Không tìm thấy phiên")
     if respondent["status"] == "completed": raise HTTPException(409,"Phiên khảo sát đã khóa sau khi hoàn thành")
-    if row("SELECT id FROM answers WHERE respondent_id=? AND question_id=?",(sid,body.question_id)):
+    existing=row("SELECT option_id,value_json FROM answers WHERE respondent_id=? AND question_id=?",(sid,body.question_id))
+    if existing:
+        previous_value=json.loads(existing["value_json"] or "null")
+        if str(existing["option_id"])==str(body.option_id) and previous_value==body.value:return {"ok":True,"replayed":True}
         raise HTTPException(409,"Đáp án đã được ghi nhận và không thể chỉnh sửa")
     expected=next_question(sid)
     if expected.get("done") or expected.get("question",{}).get("id") != body.question_id:
@@ -205,18 +229,28 @@ def answer(sid: str, body: Answer):
     q=hydrated_question(q,respondent)
     option=next((o for o in q["options"] if str(o["id"])==str(body.option_id)),None)
     if not option: raise HTTPException(422,"Lựa chọn không hợp lệ")
+    answered_at=now();timing=row("SELECT shown_at FROM question_timing WHERE respondent_id=? AND question_id=?",(sid,body.question_id));duration=None
+    if timing:
+        try: duration=int((datetime.now(timezone.utc)-datetime.fromisoformat(timing["shown_at"])).total_seconds()*1000)
+        except Exception: pass
+    remote_record={"question_id":body.question_id,"option_id":body.option_id,"value":body.value,"scores":option.get("scores",{}),"answered_at":answered_at,"duration_ms":duration}
+    try:persist_answer(sid,remote_record)
+    except DuplicateAnswer:raise HTTPException(409,"Đáp án đã được ghi nhận và không thể chỉnh sửa")
+    session_updates={}
+    if body.question_id=="P00" and isinstance(body.value,str):session_updates["name"]=body.value.strip() or "bạn"
+    if body.question_id in ("P01a","P01b"):session_updates["product"]=option["label"]
+    if body.question_id=="P01c":session_updates["theme"]=option.get("theme","rose")
+    if body.question_id=="P02":session_updates["platform"]=option["label"]
+    if session_updates:persist_session_update(sid,session_updates)
     with connect() as con:
-        con.execute("INSERT INTO answers(respondent_id,question_id,option_id,value_json,scores_json,answered_at) VALUES(?,?,?,?,?,?)",(sid,body.question_id,body.option_id,json.dumps(body.value,ensure_ascii=False),json.dumps(option.get("scores",{})),now()))
+        con.execute("INSERT INTO answers(respondent_id,question_id,option_id,value_json,scores_json,answered_at) VALUES(?,?,?,?,?,?)",(sid,body.question_id,body.option_id,json.dumps(body.value,ensure_ascii=False),json.dumps(option.get("scores",{})),answered_at))
         if body.question_id=="P00" and isinstance(body.value, str): con.execute("UPDATE respondents SET name=? WHERE id=?",(body.value.strip() or "bạn",sid))
         if body.question_id=="P01a": con.execute("UPDATE respondents SET product=? WHERE id=?",(option["label"],sid))
         if body.question_id=="P01b": con.execute("UPDATE respondents SET product=? WHERE id=?",(option["label"],sid))
         if body.question_id=="P01c": con.execute("UPDATE respondents SET theme=? WHERE id=?",(option.get("theme","rose"),sid))
         if body.question_id=="P02": con.execute("UPDATE respondents SET platform=? WHERE id=?",(option["label"],sid))
-        timing=con.execute("SELECT shown_at FROM question_timing WHERE respondent_id=? AND question_id=?",(sid,body.question_id)).fetchone()
         if timing:
-            try: duration=int((datetime.now(timezone.utc)-datetime.fromisoformat(timing["shown_at"])).total_seconds()*1000)
-            except Exception: duration=None
-            con.execute("UPDATE question_timing SET answered_at=?,duration_ms=? WHERE respondent_id=? AND question_id=?",(now(),duration,sid,body.question_id))
+            con.execute("UPDATE question_timing SET answered_at=?,duration_ms=? WHERE respondent_id=? AND question_id=?",(answered_at,duration,sid,body.question_id))
     return {"ok":True}
 
 def score_result(sid):
