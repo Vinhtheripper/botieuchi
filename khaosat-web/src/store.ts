@@ -8,7 +8,7 @@ export const {setSession}=session.actions
 export const api=createApi({reducerPath:'api',baseQuery:fetchBaseQuery({baseUrl:API_BASE_URL,prepareHeaders(h){const token=sessionStorage.getItem('admin_token');if(token)h.set('authorization',`Bearer ${token}`);return h}}),tagTypes:['Dashboard','Next'],endpoints:b=>({
  start:b.mutation<{id:string},{name:string;email?:string;consent:boolean}>({query:body=>({url:'sessions',method:'POST',body})}),
  next:b.query<Next,string>({query:id=>`sessions/${id}/next`,providesTags:['Next']}),
- answer:b.mutation<{ok:boolean;replayed?:boolean;next:Next},{id:string;question_id:string;option_id:string;value?:string}>({query:({id,...body})=>({url:`sessions/${id}/answers`,method:'POST',body}),async onQueryStarted({id},{dispatch,queryFulfilled}){const{data}=await queryFulfilled;dispatch(api.util.updateQueryData('next',id,draft=>Object.assign(draft,data.next)))}}),
+ answer:b.mutation<{ok:boolean;replayed?:boolean;next?:Next},{id:string;question_id:string;option_id:string;value?:string}>({query:({id,...body})=>({url:`sessions/${id}/answers`,method:'POST',body}),async onQueryStarted({id},{dispatch,queryFulfilled}){const{data}=await queryFulfilled;if(data.next)dispatch(api.util.updateQueryData('next',id,draft=>Object.assign(draft,data.next)));else dispatch(api.util.invalidateTags(['Next']))}}),
  dashboard:b.query<Dashboard,void>({query:()=>`admin/dashboard`,providesTags:['Dashboard']}),
  sheets:b.query<any[],void>({query:()=>`admin/sheets`}),
  reimport:b.mutation<any,void>({query:()=>({url:'admin/import',method:'POST'}),invalidatesTags:['Dashboard']}),
