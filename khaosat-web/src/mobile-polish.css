@@ -4,9 +4,10 @@ button,input,textarea,select{max-width:100%}
 
 @media(max-width:600px){
   .survey-shell,.question-page,.finish,.admin-login{min-height:100svh}
+  .survey-shell{display:flex;flex-direction:column}
   .survey-shell>header{padding:18px 18px}
   .survey-shell:after{width:240px;height:240px;right:-150px;top:80px;box-shadow:0 0 0 45px #ffffff55,0 0 0 90px #ffffff33}
-  .welcome{margin-top:1.5svh;padding:0 16px}
+  .welcome{width:100%;flex:1;display:flex;flex-direction:column;justify-content:center;margin:0 auto;padding:8px 16px}
   .welcome .eyebrow{font-size:9px;letter-spacing:1.35px}
   .welcome h1{font-size:clamp(34px,10.5vw,43px);line-height:1.04;margin:15px 0;letter-spacing:-1.8px}
   .welcome>p{font-size:13px;line-height:1.55;padding:0 4px}
@@ -15,13 +16,13 @@ button,input,textarea,select{max-width:100%}
   .start-card{margin:18px auto;padding:12px;border-radius:18px;gap:8px}
   .start-card input{min-height:48px;font-size:16px}
   .consent{font-size:11px;padding:6px 2px}
-  .survey-shell footer{padding:16px 20px 24px}
+  .survey-shell footer{padding:12px 20px calc(18px + env(safe-area-inset-bottom))}
 
   .q-head{height:58px;padding:0 16px}
   .q-head .brand{gap:8px;font-size:13px}
   .q-head .logo{width:30px;height:30px;border-radius:9px;font-size:17px}
   .progress{height:4px}
-  .question-wrap{width:100%;padding:22px 15px calc(28px + env(safe-area-inset-bottom))}
+  .question-wrap{width:100%;min-height:calc(100svh - 62px);display:flex;flex-direction:column;justify-content:center;padding:18px 15px calc(22px + env(safe-area-inset-bottom))}
   .chapter-copy{font-size:9px;letter-spacing:1.05px;margin-bottom:9px}
   .question-meta{margin-bottom:14px}
   .question-meta span{padding:6px 9px;font-size:10px}
@@ -52,7 +53,7 @@ button,input,textarea,select{max-width:100%}
   .text-answer input{width:100%;min-height:44px}
   .text-answer button{width:100%;min-height:46px}
 
-  .persona-page{padding:28px 13px calc(28px + env(safe-area-inset-bottom))}
+  .persona-page{padding:22px 13px calc(24px + env(safe-area-inset-bottom))}
   .persona-orbit{height:32px;font-size:20px}
   .persona-page>h1{font-size:clamp(32px,10vw,40px);line-height:1.05;letter-spacing:-1.5px;margin:10px 0 18px}
   .persona-card{padding:22px 17px;border-radius:20px}
