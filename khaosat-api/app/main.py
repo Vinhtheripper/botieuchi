@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from firebase_admin import storage as firebase_storage
+from urllib.parse import quote
 from dotenv import load_dotenv
 from .database import init_db, connect, rows, row, decode, DB_PATH
 from .excel_import import import_workbook
@@ -138,9 +140,11 @@ def hydrated_question(q, respondent=None):
             base=q["text"].split("]",1)[1].strip() if q["text"].startswith("[") else q["text"]
             q["text"]=f"{q['story_lead']} {base}"
     media=rows("SELECT option_id,path FROM question_media WHERE question_id IN (?,?) ORDER BY question_id DESC,id",(media_key,q["id"]))
+    question_image=next((m for m in media if m["option_id"]=="__question__"),None)
+    if question_image:q["image_url"]=question_image["path"] if question_image["path"].startswith("http") else "/media/"+question_image["path"]
     for option in q["options"]:
         item=next((m for m in media if m["option_id"]==str(option["id"])),None)
-        if item: option["image_url"]="/media/"+item["path"]
+        if item: option["image_url"]=item["path"] if item["path"].startswith("http") else "/media/"+item["path"]
     return q
 
 def public_question(q):
@@ -219,7 +223,7 @@ def answer(sid: str, body: Answer):
     existing=row("SELECT option_id,value_json FROM answers WHERE respondent_id=? AND question_id=?",(sid,body.question_id))
     if existing:
         previous_value=json.loads(existing["value_json"] or "null")
-        if str(existing["option_id"])==str(body.option_id) and previous_value==body.value:return {"ok":True,"replayed":True}
+        if str(existing["option_id"])==str(body.option_id) and previous_value==body.value:return {"ok":True,"replayed":True,"next":next_question(sid)}
         raise HTTPException(409,"Đáp án đã được ghi nhận và không thể chỉnh sửa")
     expected=next_question(sid)
     if expected.get("done") or expected.get("question",{}).get("id") != body.question_id:
@@ -251,7 +255,7 @@ def answer(sid: str, body: Answer):
         if body.question_id=="P02": con.execute("UPDATE respondents SET platform=? WHERE id=?",(option["label"],sid))
         if timing:
             con.execute("UPDATE question_timing SET answered_at=?,duration_ms=? WHERE respondent_id=? AND question_id=?",(answered_at,duration,sid,body.question_id))
-    return {"ok":True}
+    return {"ok":True,"next":next_question(sid)}
 
 def score_result(sid):
     respondent=row("SELECT * FROM respondents WHERE id=?",(sid,)) or {}
@@ -391,6 +395,65 @@ def insights(_: None = Depends(admin)):
     sparse=[{"question":q,"options":d} for q,d in distributions.items() if sum(d.values())>=5 and any(n/sum(d.values())<.05 for n in d.values())]
     return {"ranked":ranked,"distributions":distributions,"smart_alerts":{"low_quality":sum(x["quality"]=="low" for x in ranked),"sparse_questions":sparse,"incomplete":sum(r["status"]!="completed" for r in respondents)}}
 
+@app.get("/api/admin/analytics")
+def analytics(_: None = Depends(admin)):
+    respondent_rows=rows("SELECT * FROM respondents ORDER BY started_at DESC")
+    answer_rows=rows("SELECT respondent_id,question_id,option_id,value_json,scores_json,answered_at FROM answers")
+    question_rows=[hydrated_question(q) for q in rows("SELECT * FROM questions ORDER BY position")]
+    by_user={}; distributions={}; variable_values={}
+    for answer in answer_rows:
+        by_user.setdefault(answer["respondent_id"],[]).append(answer)
+        distributions.setdefault(answer["question_id"],{}).setdefault(answer["option_id"],0)
+        distributions[answer["question_id"]][answer["option_id"]]+=1
+        for code,value in json.loads(answer.get("scores_json") or "{}").items():
+            try: variable_values.setdefault(code,[]).append(float(value))
+            except (TypeError,ValueError): pass
+    weights=heuristic_config(); respondent_summaries=[]; durations=[]
+    for respondent in respondent_rows:
+        own=by_user.get(respondent["id"],[]); measured={}
+        for answer in own:
+            for code,value in json.loads(answer.get("scores_json") or "{}").items():
+                try: measured.setdefault(code,[]).append(float(value))
+                except (TypeError,ValueError): pass
+        means={code:sum(values)/len(values) for code,values in measured.items()}
+        used=[(means[code],weights.get(code,0)) for code in means if weights.get(code,0)!=0]
+        score=3+sum((value-3)*weight for value,weight in used)/sum(abs(weight) for _,weight in used) if used else None
+        duration=None
+        if respondent.get("started_at") and respondent.get("completed_at"):
+            try:
+                duration=max(0,(datetime.fromisoformat(respondent["completed_at"])-datetime.fromisoformat(respondent["started_at"])).total_seconds())
+                durations.append(duration)
+            except (ValueError,TypeError): pass
+        respondent_summaries.append({**respondent,"answer_count":len(own),"duration_seconds":round(duration) if duration is not None else None,"score":round(score,2) if score is not None else None})
+    questions=[]
+    for question in question_rows:
+        counts=distributions.get(question["id"],{}); total=sum(counts.values())
+        option_map={option.get("id"):option.get("label") or option.get("id") for option in question.get("options",[])}
+        questions.append({"id":question["id"],"text":question["text"],"phase":question["phase"],"kind":question["kind"],"total":total,"options":[{"id":key,"label":option_map.get(key,key or "Nhập tự do"),"count":count,"percent":round(count/total*100,1) if total else 0} for key,count in sorted(counts.items(),key=lambda item:item[1],reverse=True)]})
+    daily={}
+    for respondent in respondent_rows:
+        day=(respondent.get("started_at") or "")[:10]
+        if day: daily.setdefault(day,{"date":day,"started":0,"completed":0});daily[day]["started"]+=1;daily[day]["completed"]+=respondent.get("status")=="completed"
+    def grouped(field):
+        result={}
+        for respondent in respondent_rows:
+            key=respondent.get(field) or "Chưa xác định";result[key]=result.get(key,0)+1
+        return [{"label":key,"value":value} for key,value in sorted(result.items(),key=lambda item:item[1],reverse=True)]
+    completed=sum(respondent.get("status")=="completed" for respondent in respondent_rows); total=len(respondent_rows)
+    return {"kpis":{"total":total,"completed":completed,"active":total-completed,"completion_rate":round(completed/total*100,1) if total else 0,"answers":len(answer_rows),"average_duration_seconds":round(sum(durations)/len(durations)) if durations else None},"daily":list(sorted(daily.values(),key=lambda item:item["date"]))[-30:],"platforms":grouped("platform"),"products":grouped("product"),"variables":[{"code":code,"average":round(sum(values)/len(values),2),"responses":len(values)} for code,values in sorted(variable_values.items(),key=lambda item:sum(item[1])/len(item[1]),reverse=True)],"questions":questions,"respondents":respondent_summaries}
+
+@app.get("/api/admin/respondents/{sid}/answers")
+def respondent_answers(sid:str, _: None = Depends(admin)):
+    respondent=row("SELECT * FROM respondents WHERE id=?",(sid,))
+    if not respondent: raise HTTPException(404,"Không tìm thấy người trả lời")
+    answer_rows=rows("SELECT question_id,option_id,value_json,scores_json,answered_at FROM answers WHERE respondent_id=? ORDER BY answered_at",(sid,))
+    question_map={question["id"]:question for question in [hydrated_question(q) for q in rows("SELECT * FROM questions ORDER BY position")]}
+    result=[]
+    for answer in answer_rows:
+        question=question_map.get(answer["question_id"],{}); option=next((item for item in question.get("options",[]) if item.get("id")==answer["option_id"]),{})
+        result.append({**answer,"question":question.get("text",answer["question_id"]),"phase":question.get("phase",""),"answer":option.get("label") or json.loads(answer.get("value_json") or "null") or answer["option_id"],"scores":json.loads(answer.get("scores_json") or "{}")})
+    return {"respondent":respondent,"answers":result}
+
 class UpdateVariable(BaseModel):
     name_vi: str
     name_en: str = ""
@@ -441,15 +504,20 @@ async def upload_media(question_id:str=Form(...),option_id:str=Form(...),file:Up
     if file.content_type not in allowed:raise HTTPException(422,"Chỉ hỗ trợ JPG, PNG, WEBP hoặc GIF")
     content=await file.read(5*1024*1024+1)
     if len(content)>5*1024*1024:raise HTTPException(413,"Ảnh tối đa 5MB")
-    filename=f"{uuid.uuid4().hex}.{allowed[file.content_type]}";(MEDIA_DIR/filename).write_bytes(content)
+    filename=f"{uuid.uuid4().hex}.{allowed[file.content_type]}"
+    stored_path=filename
+    if firestore_enabled():
+        token=uuid.uuid4().hex;object_name=f"survey-media/{filename}";blob=firebase_storage.bucket().blob(object_name);blob.metadata={"firebaseStorageDownloadTokens":token};blob.upload_from_string(content,content_type=file.content_type);blob.patch();bucket_name=blob.bucket.name;stored_path=f"https://firebasestorage.googleapis.com/v0/b/{bucket_name}/o/{quote(object_name,safe='')}?alt=media&token={token}"
+    else:(MEDIA_DIR/filename).write_bytes(content)
     with connect() as con:
         old=con.execute("SELECT path FROM question_media WHERE question_id=? AND option_id=?",(question_id,option_id)).fetchone()
         con.execute("DELETE FROM question_media WHERE question_id=? AND option_id=?",(question_id,option_id))
-        con.execute("INSERT INTO question_media(question_id,option_id,path,mime_type,original_name,created_at) VALUES(?,?,?,?,?,?)",(question_id,option_id,filename,file.content_type,file.filename,now()))
+        con.execute("INSERT INTO question_media(question_id,option_id,path,mime_type,original_name,created_at) VALUES(?,?,?,?,?,?)",(question_id,option_id,stored_path,file.content_type,file.filename,now()))
     if old:
-        try:(MEDIA_DIR/old["path"]).unlink()
+        try:
+            if not old["path"].startswith("http"):(MEDIA_DIR/old["path"]).unlink()
         except OSError:pass
-    audit(user,"upload","question_media",f"{question_id}:{option_id}",{"file":file.filename});return {"ok":True,"image_url":"/media/"+filename}
+    audit(user,"upload","question_media",f"{question_id}:{option_id}",{"file":file.filename});return {"ok":True,"image_url":stored_path if stored_path.startswith("http") else "/media/"+stored_path}
 
 @app.get("/api/admin/audit")
 def audit_list(limit:int=200,_=Depends(admin)):return rows("SELECT l.*,u.username FROM audit_logs l LEFT JOIN admin_users u ON u.id=l.admin_id ORDER BY l.id DESC LIMIT ?",(min(limit,500),))

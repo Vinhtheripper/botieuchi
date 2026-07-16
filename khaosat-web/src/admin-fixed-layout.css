@@ -1,0 +1,25 @@
+/* Keep the desktop navigation anchored while only the workspace scrolls. */
+@media (min-width: 601px) {
+  .admin {
+    height: 100vh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .admin > aside {
+    position: relative;
+    top: auto;
+    height: 100vh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .admin > .admin-main {
+    height: 100vh;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+}

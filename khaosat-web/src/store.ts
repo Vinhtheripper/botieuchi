@@ -8,7 +8,7 @@ export const {setSession}=session.actions
 export const api=createApi({reducerPath:'api',baseQuery:fetchBaseQuery({baseUrl:API_BASE_URL,prepareHeaders(h){const token=sessionStorage.getItem('admin_token');if(token)h.set('authorization',`Bearer ${token}`);return h}}),tagTypes:['Dashboard','Next'],endpoints:b=>({
  start:b.mutation<{id:string},{name:string;email?:string;consent:boolean}>({query:body=>({url:'sessions',method:'POST',body})}),
  next:b.query<Next,string>({query:id=>`sessions/${id}/next`,providesTags:['Next']}),
- answer:b.mutation<any,{id:string;question_id:string;option_id:string;value?:string}>({query:({id,...body})=>({url:`sessions/${id}/answers`,method:'POST',body}),invalidatesTags:['Next']}),
+ answer:b.mutation<{ok:boolean;replayed?:boolean;next:Next},{id:string;question_id:string;option_id:string;value?:string}>({query:({id,...body})=>({url:`sessions/${id}/answers`,method:'POST',body}),async onQueryStarted({id},{dispatch,queryFulfilled}){const{data}=await queryFulfilled;dispatch(api.util.updateQueryData('next',id,draft=>Object.assign(draft,data.next)))}}),
  dashboard:b.query<Dashboard,void>({query:()=>`admin/dashboard`,providesTags:['Dashboard']}),
  sheets:b.query<any[],void>({query:()=>`admin/sheets`}),
  reimport:b.mutation<any,void>({query:()=>({url:'admin/import',method:'POST'}),invalidatesTags:['Dashboard']}),
@@ -19,6 +19,8 @@ export const api=createApi({reducerPath:'api',baseQuery:fetchBaseQuery({baseUrl:
  heuristic:b.query<any,void>({query:()=>`admin/heuristic`}),
  saveHeuristic:b.mutation<any,{weights:Record<string,number>}>({query:body=>({url:'admin/heuristic',method:'PUT',body})}),
  insights:b.query<any,void>({query:()=>`admin/insights`,providesTags:['Dashboard']}),
+ analytics:b.query<any,void>({query:()=>`admin/analytics`,providesTags:['Dashboard']}),
+ respondentAnswers:b.query<any,string>({query:id=>`admin/respondents/${id}/answers`}),
  settings:b.query<any,void>({query:()=>`admin/settings`,providesTags:['Dashboard']}),
  setPilot:b.mutation<any,{enabled:boolean}>({query:body=>({url:'admin/settings/pilot',method:'PUT',body}),invalidatesTags:['Dashboard']}),
  branches:b.query<any[],void>({query:()=>`admin/branches`,providesTags:['Dashboard']}),
@@ -31,6 +33,6 @@ export const api=createApi({reducerPath:'api',baseQuery:fetchBaseQuery({baseUrl:
  createNote:b.mutation<any,{title:string;content:string}>({query:body=>({url:'admin/notes',method:'POST',body}),invalidatesTags:['Dashboard']}),
  deleteNote:b.mutation<any,number>({query:id=>({url:`admin/notes/${id}`,method:'DELETE'}),invalidatesTags:['Dashboard']}),
 })})
-export const {useStartMutation,useNextQuery,useAnswerMutation,useDashboardQuery,useSheetsQuery,useReimportMutation,useUpdateQuestionMutation,useCreateQuestionMutation,useDeleteQuestionMutation,useAddSheetRowMutation,useHeuristicQuery,useSaveHeuristicMutation,useInsightsQuery,useSettingsQuery,useSetPilotMutation,useBranchesQuery,useCreateBranchMutation,useDeleteBranchMutation,useAuditQuery,useAdminUsersQuery,useCreateAdminUserMutation,useNotesQuery,useCreateNoteMutation,useDeleteNoteMutation}=api
+export const {useStartMutation,useNextQuery,useAnswerMutation,useDashboardQuery,useSheetsQuery,useReimportMutation,useUpdateQuestionMutation,useCreateQuestionMutation,useDeleteQuestionMutation,useAddSheetRowMutation,useHeuristicQuery,useSaveHeuristicMutation,useInsightsQuery,useAnalyticsQuery,useRespondentAnswersQuery,useSettingsQuery,useSetPilotMutation,useBranchesQuery,useCreateBranchMutation,useDeleteBranchMutation,useAuditQuery,useAdminUsersQuery,useCreateAdminUserMutation,useNotesQuery,useCreateNoteMutation,useDeleteNoteMutation}=api
 export const store=configureStore({reducer:{session:session.reducer,[api.reducerPath]:api.reducer},middleware:g=>g().concat(api.middleware)})
 export type RootState=ReturnType<typeof store.getState>

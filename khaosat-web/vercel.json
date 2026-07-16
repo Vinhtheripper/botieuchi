@@ -6,6 +6,10 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
+      "source": "/media/(.*)",
+      "destination": "https://botieuchi.onrender.com/media/$1"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }

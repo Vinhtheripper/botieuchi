@@ -1,3 +1,4 @@
 .options button.has-image > span { display: grid; grid-template-columns: 76px 1fr; align-items: center; gap: 14px; }
+html[data-has-question-image="true"] .scenario-card { background-image: var(--question-image); background-size: 100% 220px; background-position: top center; background-repeat: no-repeat; padding-top: 245px; }
 .options button.has-image img { width: 76px; height: 58px; object-fit: cover; border-radius: 9px; }
-@media (max-width: 600px) { .options button.has-image > span { grid-template-columns: 58px 1fr; } .options button.has-image img { width: 58px; height: 50px; } }
+@media (max-width: 600px) { .options button.has-image > span { grid-template-columns: 58px 1fr; } .options button.has-image img { width: 58px; height: 50px; } html[data-has-question-image="true"] .scenario-card { background-size: 100% 155px; padding-top: 174px!important; } }
