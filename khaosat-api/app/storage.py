@@ -77,6 +77,16 @@ def persist_skip(sid, qid, variables, reason, created_at):
     _backup("question.skipped", {"respondent_id":sid,**record})
 
 
+def rollback_remote_answer(sid, qid):
+    """Remove one answer and derived skips so the route can be calculated again."""
+    if firestore_enabled():
+        session=_client().collection("survey_sessions").document(sid)
+        session.collection("answers").document(qid).delete(timeout=FIRESTORE_TIMEOUT)
+        for snapshot in session.collection("skipped").stream():
+            snapshot.reference.delete(timeout=FIRESTORE_TIMEOUT)
+    _backup("answer.rolled_back", {"respondent_id":sid,"question_id":qid})
+
+
 def restore_projection():
     """Rebuild the local read model from Firestore after an ephemeral restart."""
     if not firestore_enabled():

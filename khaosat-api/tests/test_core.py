@@ -5,7 +5,7 @@ from fastapi import HTTPException
 from app import database
 from app.database import init_db, row, connect
 from app.excel_import import import_workbook
-from app.main import Start, Answer, start, next_question, answer, password_hash, password_ok
+from app.main import Start, Answer, start, next_question, answer, previous_question, password_hash, password_ok
 
 class SurveySecurityTests(unittest.TestCase):
     @classmethod
@@ -43,6 +43,15 @@ class SurveySecurityTests(unittest.TestCase):
         answer(sid,Answer(question_id=q["id"],option_id=q["options"][0]["id"],value="Tester"))
         timing=row("SELECT * FROM question_timing WHERE respondent_id=? AND question_id=?",(sid,q["id"]))
         self.assertIsNotNone(timing["answered_at"]);self.assertGreaterEqual(timing["duration_ms"],0)
+
+    def test_user_can_go_back_and_replace_last_answer(self):
+        sid=self.new_session();q=next_question(sid)["question"]
+        answer(sid,Answer(question_id=q["id"],option_id=q["options"][0]["id"],value="Tên cũ"))
+        previous=previous_question(sid)["next"]["question"]
+        self.assertEqual(previous["id"],q["id"])
+        answer(sid,Answer(question_id=q["id"],option_id=q["options"][0]["id"],value="Tên mới"))
+        saved=row("SELECT value_json FROM answers WHERE respondent_id=? AND question_id=?",(sid,q["id"]))
+        self.assertEqual(saved["value_json"],'"Tên mới"')
 
     def test_pilot_mode_disables_heuristic_skip(self):
         with connect() as con:con.execute("INSERT OR REPLACE INTO settings VALUES('pilot_mode','true')")

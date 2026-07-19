@@ -16,7 +16,7 @@ from .excel_import import import_workbook
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 from .firebase import initialize_firebase
-from .storage import DuplicateAnswer, firestore_enabled, persist_answer, persist_session, persist_session_update, persist_skip, restore_projection
+from .storage import DuplicateAnswer, firestore_enabled, persist_answer, persist_session, persist_session_update, persist_skip, restore_projection, rollback_remote_answer
 
 ALLOWED_ORIGINS=[origin.strip() for origin in os.getenv("ALLOWED_ORIGINS","http://localhost:5173").split(",") if origin.strip()]
 app = FastAPI(title="GROUP2 Survey API", version="1.0.0")
@@ -29,6 +29,9 @@ RATE_BUCKETS={}
 RATE_LAST_CLEANUP=0.0
 
 def now(): return datetime.now(timezone.utc).isoformat()
+def participant_name(sid, value=None):
+    cleaned=(value or "").strip()
+    return cleaned if cleaned and cleaned.lower() not in ("bạn","ẩn danh") else f"Người tham gia #{sid[:6].upper()}"
 def password_hash(password,salt=None):
     salt=salt or secrets.token_hex(16); digest=hashlib.scrypt(password.encode(),salt=bytes.fromhex(salt),n=2**14,r=8,p=1).hex()
     return f"scrypt${salt}${digest}"
@@ -105,9 +108,9 @@ class Answer(BaseModel):
 @app.post("/api/sessions")
 def start(body: Start):
     sid = str(uuid.uuid4())
-    created_at=now();record={"id":sid,"name":body.name,"email":body.email,"consent":bool(body.consent),"theme":"rose","started_at":created_at,"completed_at":None,"status":"active"}
+    created_at=now();name=participant_name(sid,body.name);record={"id":sid,"name":name,"email":body.email,"consent":bool(body.consent),"theme":"rose","started_at":created_at,"completed_at":None,"status":"active"}
     persist_session(record)
-    with connect() as con: con.execute("INSERT INTO respondents(id,name,email,consent,theme,started_at,status) VALUES(?,?,?,?,?,?,?)",(sid,body.name,body.email,int(body.consent),"rose",created_at,"active"))
+    with connect() as con: con.execute("INSERT INTO respondents(id,name,email,consent,theme,started_at,status) VALUES(?,?,?,?,?,?,?)",(sid,name,body.email,int(body.consent),"rose",created_at,"active"))
     return {"id": sid}
 
 def hydrated_question(q, respondent=None):
@@ -241,20 +244,35 @@ def answer(sid: str, body: Answer):
     try:persist_answer(sid,remote_record)
     except DuplicateAnswer:raise HTTPException(409,"Đáp án đã được ghi nhận và không thể chỉnh sửa")
     session_updates={}
-    if body.question_id=="P00" and isinstance(body.value,str):session_updates["name"]=body.value.strip() or "bạn"
+    if body.question_id=="P00" and isinstance(body.value,str) and body.value.strip():session_updates["name"]=body.value.strip()
     if body.question_id in ("P01a","P01b"):session_updates["product"]=option["label"]
     if body.question_id=="P01c":session_updates["theme"]=option.get("theme","rose")
     if body.question_id=="P02":session_updates["platform"]=option["label"]
     if session_updates:persist_session_update(sid,session_updates)
     with connect() as con:
         con.execute("INSERT INTO answers(respondent_id,question_id,option_id,value_json,scores_json,answered_at) VALUES(?,?,?,?,?,?)",(sid,body.question_id,body.option_id,json.dumps(body.value,ensure_ascii=False),json.dumps(option.get("scores",{})),answered_at))
-        if body.question_id=="P00" and isinstance(body.value, str): con.execute("UPDATE respondents SET name=? WHERE id=?",(body.value.strip() or "bạn",sid))
+        if body.question_id=="P00" and isinstance(body.value, str) and body.value.strip(): con.execute("UPDATE respondents SET name=? WHERE id=?",(body.value.strip(),sid))
         if body.question_id=="P01a": con.execute("UPDATE respondents SET product=? WHERE id=?",(option["label"],sid))
         if body.question_id=="P01b": con.execute("UPDATE respondents SET product=? WHERE id=?",(option["label"],sid))
         if body.question_id=="P01c": con.execute("UPDATE respondents SET theme=? WHERE id=?",(option.get("theme","rose"),sid))
         if body.question_id=="P02": con.execute("UPDATE respondents SET platform=? WHERE id=?",(option["label"],sid))
         if timing:
             con.execute("UPDATE question_timing SET answered_at=?,duration_ms=? WHERE respondent_id=? AND question_id=?",(answered_at,duration,sid,body.question_id))
+    return {"ok":True,"next":next_question(sid)}
+
+@app.post("/api/sessions/{sid}/back")
+def previous_question(sid:str):
+    respondent=row("SELECT * FROM respondents WHERE id=?",(sid,))
+    if not respondent: raise HTTPException(404,"Không tìm thấy phiên")
+    previous=row("SELECT question_id FROM answers WHERE respondent_id=? ORDER BY answered_at DESC,id DESC LIMIT 1",(sid,))
+    if not previous:return {"ok":True,"next":next_question(sid)}
+    rollback_remote_answer(sid,previous["question_id"])
+    with connect() as con:
+        con.execute("DELETE FROM answers WHERE respondent_id=? AND question_id=?",(sid,previous["question_id"]))
+        con.execute("DELETE FROM skipped WHERE respondent_id=?",(sid,))
+        con.execute("DELETE FROM question_timing WHERE respondent_id=? AND question_id=?",(sid,previous["question_id"]))
+        con.execute("UPDATE respondents SET status='active',completed_at=NULL WHERE id=?",(sid,))
+    persist_session_update(sid,{"status":"active","completed_at":None})
     return {"ok":True,"next":next_question(sid)}
 
 def score_result(sid):
