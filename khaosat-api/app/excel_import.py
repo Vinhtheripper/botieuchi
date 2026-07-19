@@ -16,6 +16,11 @@ def clean(value):
     if isinstance(value, float) and value.is_integer(): return int(value)
     return value
 
+def variable_code(value):
+    """Excel đôi khi ghi chú ngay sau mã, ví dụ `PLAT (gắn bó)`."""
+    if not isinstance(value, str): return value
+    return re.split(r"\s*[（(]", value.strip(), maxsplit=1)[0].strip()
+
 def import_workbook(path: Path = WORKBOOK):
     wb = load_workbook(path, data_only=False)
     now = datetime.now(timezone.utc).isoformat()
@@ -54,7 +59,7 @@ def import_workbook(path: Path = WORKBOOK):
             if not isinstance(qid, str) or not re.fullmatch(r"(?:Q\d{2}|P\d{2}[ab]?|AC\d+)", qid): continue
             pos += 1
             text = ws.cell(r, 2).value or ""
-            variables = [ws.cell(r, c).value for c in range(3, 6) if ws.cell(r, c).value]
+            variables = [variable_code(ws.cell(r, c).value) for c in range(3, 6) if ws.cell(r, c).value]
             options = []
             rr = r + 1
             while rr <= ws.max_row and ws.cell(rr, 1).value in ("A", "B", "C", "D"):
@@ -92,7 +97,7 @@ def import_workbook(path: Path = WORKBOOK):
             qid = ws.cell(r,1).value
             if not qid: continue
             pos += 1
-            variable = ws.cell(r,2).value
+            variable = variable_code(ws.cell(r,2).value)
             text = ws.cell(r,3).value
             if qid == "F01":
                 statement, option_text = text.split("  A.", 1)

@@ -5,7 +5,7 @@ from fastapi import HTTPException
 from app import database
 from app.database import init_db, row, connect
 from app.excel_import import import_workbook
-from app.main import Start, Answer, start, next_question, answer, previous_question, password_hash, password_ok
+from app.main import Start, Answer, AnswerBatch, start, next_question, survey_manifest, answer, answer_batch, previous_question, password_hash, password_ok
 
 class SurveySecurityTests(unittest.TestCase):
     @classmethod
@@ -52,6 +52,14 @@ class SurveySecurityTests(unittest.TestCase):
         answer(sid,Answer(question_id=q["id"],option_id=q["options"][0]["id"],value="Tên mới"))
         saved=row("SELECT value_json FROM answers WHERE respondent_id=? AND question_id=?",(sid,q["id"]))
         self.assertEqual(saved["value_json"],'"Tên mới"')
+
+    def test_public_manifest_and_batch_sync(self):
+        sid=self.new_session();manifest=survey_manifest(sid)
+        self.assertGreater(len(manifest["questions"]),20)
+        self.assertNotIn("scores",manifest["questions"][0]["options"][0])
+        first=next_question(sid)["question"]
+        result=answer_batch(sid,AnswerBatch(answers=[Answer(question_id=first["id"],option_id=first["options"][0]["id"],value="Batch")]))
+        self.assertEqual(result["accepted"],1);self.assertEqual(result["next"]["answered"],1)
 
     def test_pilot_mode_disables_heuristic_skip(self):
         with connect() as con:con.execute("INSERT OR REPLACE INTO settings VALUES('pilot_mode','true')")

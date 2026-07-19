@@ -104,6 +104,10 @@ class Answer(BaseModel):
     question_id: str
     option_id: str
     value: Optional[Union[dict, str, int]] = None
+    duration_ms: Optional[int] = None
+
+class AnswerBatch(BaseModel):
+    answers: list[Answer]
 
 @app.post("/api/sessions")
 def start(body: Start):
@@ -118,9 +122,11 @@ def hydrated_question(q, respondent=None):
     q["variables"],q["options"]=q.pop("variables_json"),q.pop("options_json")
     media_key=q["id"]
     if respondent:
+        respondent_name=respondent.get("name") or "bạn"
+        if respondent_name.startswith("Người tham gia #") or respondent_name.lower() in ("ẩn danh","bạn"):respondent_name="bạn"
         q["text"] = (q["text"].replace("{PRODUCT}",respondent.get("product") or "sản phẩm quen thuộc")
             .replace("{PLATFORM}",respondent.get("platform") or "nền tảng bạn thường dùng")
-            .replace("{NAME}",respondent.get("name") or "bạn"))
+            .replace("{NAME}",respondent_name))
         if q["id"] == "P01b" and respondent.get("product"):
             category = respondent["product"]
             names = ["Thời trang", "Mỹ phẩm", "Công nghệ", "Gia dụng"]
@@ -218,6 +224,14 @@ def next_question(sid: str):
     result=score_result(sid);result["name"]=respondent.get("name") if respondent.get("name") not in (None,"bạn","Ẩn danh") else None
     return {"done":True,"progress":100,"result":result}
 
+@app.get("/api/sessions/{sid}/manifest")
+def survey_manifest(sid:str):
+    if not row("SELECT id FROM respondents WHERE id=?",(sid,)):raise HTTPException(404,"Không tìm thấy phiên")
+    questions=[public_question(hydrated_question(question)) for question in rows("SELECT * FROM questions WHERE active=1 ORDER BY position")]
+    branches=rows("SELECT source_question,target_question,operator,expected_value,action FROM branch_rules WHERE active=1")
+    version=row("SELECT value FROM settings WHERE key='last_import'")
+    return {"version":version["value"] if version else "1","questions":questions,"branches":branches}
+
 @app.post("/api/sessions/{sid}/answers")
 def answer(sid: str, body: Answer):
     respondent=row("SELECT * FROM respondents WHERE id=?",(sid,))
@@ -236,8 +250,8 @@ def answer(sid: str, body: Answer):
     q=hydrated_question(q,respondent)
     option=next((o for o in q["options"] if str(o["id"])==str(body.option_id)),None)
     if not option: raise HTTPException(422,"Lựa chọn không hợp lệ")
-    answered_at=now();timing=row("SELECT shown_at FROM question_timing WHERE respondent_id=? AND question_id=?",(sid,body.question_id));duration=None
-    if timing:
+    answered_at=now();timing=row("SELECT shown_at FROM question_timing WHERE respondent_id=? AND question_id=?",(sid,body.question_id));duration=max(0,min(body.duration_ms,3600000)) if body.duration_ms is not None else None
+    if timing and duration is None:
         try: duration=int((datetime.now(timezone.utc)-datetime.fromisoformat(timing["shown_at"])).total_seconds()*1000)
         except Exception: pass
     remote_record={"question_id":body.question_id,"option_id":body.option_id,"value":body.value,"scores":option.get("scores",{}),"answered_at":answered_at,"duration_ms":duration}
@@ -259,6 +273,16 @@ def answer(sid: str, body: Answer):
         if timing:
             con.execute("UPDATE question_timing SET answered_at=?,duration_ms=? WHERE respondent_id=? AND question_id=?",(answered_at,duration,sid,body.question_id))
     return {"ok":True,"next":next_question(sid)}
+
+@app.post("/api/sessions/{sid}/answers/batch")
+def answer_batch(sid:str,body:AnswerBatch):
+    if len(body.answers)>10:raise HTTPException(422,"Mỗi batch tối đa 10 câu trả lời")
+    accepted=0;error=None
+    for item in body.answers:
+        try:answer(sid,item);accepted+=1
+        except HTTPException as exc:
+            error={"status":exc.status_code,"detail":exc.detail};break
+    return {"ok":error is None,"accepted":accepted,"rejected":len(body.answers)-accepted,"error":error,"next":next_question(sid)}
 
 @app.post("/api/sessions/{sid}/back")
 def previous_question(sid:str):
