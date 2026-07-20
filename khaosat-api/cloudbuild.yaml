@@ -1,0 +1,25 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: [build, -t, '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/group2-api:$COMMIT_SHA', .]
+  - name: gcr.io/cloud-builders/docker
+    args: [push, '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/group2-api:$COMMIT_SHA']
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - group2-api
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/group2-api:$COMMIT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --min-instances=1
+      - --max-instances=10
+      - --concurrency=40
+      - --cpu=1
+      - --memory=512Mi
+substitutions:
+  _REGION: asia-southeast1
+  _REPOSITORY: group2
+images:
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/group2-api:$COMMIT_SHA'

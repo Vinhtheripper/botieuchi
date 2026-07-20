@@ -64,15 +64,23 @@ class SurveySecurityTests(unittest.TestCase):
 
     def test_batch_uses_one_remote_checkpoint(self):
         sid=self.new_session();first=next_question(sid)["question"]
-        with patch("app.main.persist_answer_batch") as checkpoint:
+        with patch("app.main.commit_checkpoint",return_value={"replayed":False,"revision":1}) as checkpoint:
             result=answer_batch(sid,AnswerBatch(answers=[Answer(question_id=first["id"],option_id=first["options"][0]["id"],value="Checkpoint")]))
         self.assertEqual(result["accepted"],1)
         checkpoint.assert_called_once()
 
-    def test_firestore_restore_failure_does_not_crash_startup(self):
-        with patch("app.main.initialize_firebase"), patch("app.main.firestore_enabled",return_value=True), patch("app.main.restore_projection",side_effect=RuntimeError("quota")):
+    def test_startup_does_not_scan_firestore(self):
+        with patch("app.main.initialize_firebase"), patch("app.main.project_session") as lazy_loader:
             startup()
+        lazy_loader.assert_not_called()
         self.assertIsNotNone(row("SELECT value FROM settings WHERE key='last_import'"))
+
+    def test_batch_checkpoint_is_idempotent(self):
+        sid=self.new_session();first=next_question(sid)["question"]
+        body=AnswerBatch(revision=1,idempotency_key="stable-key",answers=[Answer(question_id=first["id"],option_id=first["options"][0]["id"],value="Một lần")])
+        first_result=answer_batch(sid,body);second_result=answer_batch(sid,body)
+        self.assertTrue(first_result["committed"]);self.assertEqual(second_result,first_result)
+        self.assertEqual(row("SELECT COUNT(*) AS n FROM answers WHERE respondent_id=?",(sid,))["n"],1)
 
     def test_pilot_mode_disables_heuristic_skip(self):
         with connect() as con:con.execute("INSERT OR REPLACE INTO settings VALUES('pilot_mode','true')")

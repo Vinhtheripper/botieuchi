@@ -11,7 +11,7 @@ export const api=createApi({reducerPath:'api',baseQuery:fetchBaseQuery({baseUrl:
  manifest:b.query<Manifest,string>({query:id=>`sessions/${id}/manifest`}),
  answer:b.mutation<{ok:boolean;replayed?:boolean;next?:Next},{id:string;question_id:string;option_id:string;value?:string}>({query:({id,...body})=>({url:`sessions/${id}/answers`,method:'POST',body}),async onQueryStarted({id},{dispatch,queryFulfilled}){const{data}=await queryFulfilled;if(data.next)dispatch(api.util.updateQueryData('next',id,draft=>Object.assign(draft,data.next)));else dispatch(api.util.invalidateTags(['Next']))}}),
  back:b.mutation<{ok:boolean;next:Next},string>({query:id=>({url:`sessions/${id}/back`,method:'POST'}),async onQueryStarted(id,{dispatch,queryFulfilled}){const{data}=await queryFulfilled;dispatch(api.util.updateQueryData('next',id,draft=>Object.assign(draft,data.next)))}}),
- answerBatch:b.mutation<{ok:boolean;accepted:number;rejected:number;next:Next},{id:string;answers:{question_id:string;option_id:string;value?:string;duration_ms?:number}[]}>({query:({id,...body})=>({url:`sessions/${id}/answers/batch`,method:'POST',body})}),
+ answerBatch:b.mutation<{ok:boolean;committed:boolean;replayed:boolean;revision:number;accepted:number;rejected:number;next:Next},{id:string;revision:number;idempotency_key:string;answers:{question_id:string;option_id:string;value?:string;duration_ms?:number}[]}>({query:({id,...body})=>({url:`sessions/${id}/answers/batch`,method:'POST',body})}),
  dashboard:b.query<Dashboard,void>({query:()=>`admin/dashboard`,providesTags:['Dashboard']}),
  sheets:b.query<any[],void>({query:()=>`admin/sheets`}),
  reimport:b.mutation<any,void>({query:()=>({url:'admin/import',method:'POST'}),invalidatesTags:['Dashboard']}),

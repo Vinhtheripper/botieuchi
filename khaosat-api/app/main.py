@@ -16,7 +16,7 @@ from .excel_import import import_workbook
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 from .firebase import initialize_firebase
-from .storage import DuplicateAnswer, firestore_enabled, persist_answer, persist_answer_batch, persist_session, persist_session_update, persist_skip, restore_projection, rollback_remote_answer
+from .storage import DuplicateAnswer, commit_checkpoint, firestore_enabled, persist_answer, persist_session, persist_session_update, persist_skip, project_recent_sessions, project_session, rollback_remote_answer
 
 ALLOWED_ORIGINS=[origin.strip() for origin in os.getenv("ALLOWED_ORIGINS","http://localhost:5173").split(",") if origin.strip()]
 app = FastAPI(title="GROUP2 Survey API", version="1.0.0")
@@ -27,6 +27,7 @@ BACKUP_DIR=Path(__file__).resolve().parents[1]/"backups"; BACKUP_DIR.mkdir(exist
 app.mount("/media",StaticFiles(directory=MEDIA_DIR),name="media")
 RATE_BUCKETS={}
 RATE_LAST_CLEANUP=0.0
+ANALYTICS_CACHE={"expires":0.0,"value":None}
 logger=logging.getLogger(__name__)
 
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -63,7 +64,7 @@ async def rate_limit(request:Request,call_next):
         ip=request.headers.get("x-forwarded-for","").split(',')[0].strip() or (request.client.host if request.client else "unknown")
         if len(parts)>=3 and parts[1]=="sessions": key=("session",parts[2]);limit=120
         elif parts[-1]=="login": key=("admin-login",ip);limit=10
-        else:key=("session-create",ip);limit=60
+        else:key=("session-create",ip);limit=int(os.getenv("SESSION_CREATE_RATE_LIMIT_PER_MINUTE","60"))
         bucket=[x for x in RATE_BUCKETS.get(key,[]) if current-x<60]
         if len(bucket)>=limit:return Response(content='{"detail":"Thao tác quá nhanh, vui lòng thử lại sau"}',status_code=429,media_type="application/json")
         bucket.append(current);RATE_BUCKETS[key]=bucket
@@ -76,15 +77,6 @@ async def rate_limit(request:Request,call_next):
 def startup():
     init_db()
     initialize_firebase()
-    if firestore_enabled():
-        try:
-            restored=restore_projection()
-            logger.info("Firestore projection restored: %s",restored)
-        except Exception:
-            # Firestore quota/network failure must not prevent Uvicorn from
-            # opening its port. New requests can return a controlled error
-            # while health/configuration endpoints remain available.
-            logger.exception("Không thể dựng projection từ Firestore; backend tiếp tục khởi động")
     if not row("SELECT id FROM admin_users LIMIT 1"):
         username=os.getenv("ADMIN_USERNAME","admin")
         password=os.getenv("ADMIN_PASSWORD","admin123")
@@ -117,11 +109,13 @@ class Answer(BaseModel):
 
 class AnswerBatch(BaseModel):
     answers: list[Answer]
+    revision: Optional[int] = None
+    idempotency_key: Optional[str] = None
 
 @app.post("/api/sessions")
 def start(body: Start):
     sid = str(uuid.uuid4())
-    created_at=now();name=participant_name(sid,body.name);record={"id":sid,"name":name,"email":body.email,"consent":bool(body.consent),"theme":"rose","started_at":created_at,"completed_at":None,"status":"active","answers":{},"skipped":{}}
+    created_at=now();name=participant_name(sid,body.name);record={"id":sid,"name":name,"email":body.email,"consent":bool(body.consent),"theme":"rose","started_at":created_at,"completed_at":None,"status":"active","revision":0,"checkpoints":{},"answers":{},"skipped":{}}
     persist_session(record)
     with connect() as con: con.execute("INSERT INTO respondents(id,name,email,consent,theme,started_at,status) VALUES(?,?,?,?,?,?,?)",(sid,name,body.email,int(body.consent),"rose",created_at,"active"))
     return {"id": sid}
@@ -203,6 +197,10 @@ def branch_skips(sid,qid,snapshot=None):
 @app.get("/api/sessions/{sid}/next")
 def next_question(sid: str):
     respondent=row("SELECT * FROM respondents WHERE id=?",(sid,))
+    if not respondent and firestore_enabled():
+        try: project_session(sid)
+        except Exception: logger.exception("Không thể lazy-load session %s",sid)
+        respondent=row("SELECT * FROM respondents WHERE id=?",(sid,))
     if not respondent: raise HTTPException(404,"Không tìm thấy phiên")
     answer_rows=rows("SELECT question_id,option_id,value_json,scores_json FROM answers WHERE respondent_id=?",(sid,))
     skip_rows=rows("SELECT question_id,variables_json FROM skipped WHERE respondent_id=?",(sid,))
@@ -234,8 +232,9 @@ def next_question(sid: str):
     return {"done":True,"progress":100,"result":result}
 
 @app.get("/api/sessions/{sid}/manifest")
-def survey_manifest(sid:str):
+def survey_manifest(sid:str,response:Response=None):
     if not row("SELECT id FROM respondents WHERE id=?",(sid,)):raise HTTPException(404,"Không tìm thấy phiên")
+    if response is not None:response.headers["Cache-Control"]="public, max-age=300, stale-while-revalidate=86400"
     questions=[public_question(hydrated_question(question)) for question in rows("SELECT * FROM questions WHERE active=1 ORDER BY position")]
     branches=rows("SELECT source_question,target_question,operator,expected_value,action FROM branch_rules WHERE active=1")
     version=row("SELECT value FROM settings WHERE key='last_import'")
@@ -251,7 +250,15 @@ def process_answer(sid: str, body: Answer, persist_remote=True, include_next=Tru
         if str(existing["option_id"])==str(body.option_id) and previous_value==body.value:
             record={"question_id":body.question_id,"option_id":existing["option_id"],"value":previous_value,"scores":json.loads(existing["scores_json"] or "{}"),"answered_at":existing["answered_at"],"duration_ms":body.duration_ms}
             if persist_remote:persist_answer(sid,record)
-            return record,{},next_question(sid) if include_next else None,True
+            updates={}
+            existing_question=row("SELECT * FROM questions WHERE id=?",(body.question_id,))
+            hydrated=hydrated_question(existing_question,respondent) if existing_question else None
+            selected=next((o for o in hydrated["options"] if str(o["id"])==str(body.option_id)),None) if hydrated else None
+            if body.question_id=="P00" and isinstance(previous_value,str) and previous_value.strip():updates["name"]=previous_value.strip()
+            if body.question_id in ("P01a","P01b") and selected:updates["product"]=selected["label"]
+            if body.question_id=="P01c" and selected:updates["theme"]=selected.get("theme","rose")
+            if body.question_id=="P02" and selected:updates["platform"]=selected["label"]
+            return record,updates,next_question(sid) if include_next else None,True
         raise HTTPException(409,"Đáp án đã được ghi nhận và không thể chỉnh sửa")
     expected=next_question(sid)
     if expected.get("done") or expected.get("question",{}).get("id") != body.question_id:
@@ -294,6 +301,17 @@ def answer(sid: str, body: Answer):
 @app.post("/api/sessions/{sid}/answers/batch")
 def answer_batch(sid:str,body:AnswerBatch):
     if len(body.answers)>10:raise HTTPException(422,"Mỗi batch tối đa 10 câu trả lời")
+    respondent=row("SELECT * FROM respondents WHERE id=?",(sid,))
+    if not respondent and firestore_enabled():
+        try: project_session(sid)
+        except Exception: logger.exception("Không thể lazy-load session %s",sid)
+        respondent=row("SELECT * FROM respondents WHERE id=?",(sid,))
+    if not respondent: raise HTTPException(404,"Không tìm thấy phiên")
+    revision=body.revision if body.revision is not None else int(respondent.get("revision") or 0)+1
+    idempotency_key=body.idempotency_key or f"legacy-{revision}-{uuid.uuid4().hex}"
+    replay=row("SELECT response_json FROM sync_checkpoints WHERE respondent_id=? AND idempotency_key=?",(sid,idempotency_key))
+    if replay:return json.loads(replay["response_json"])
+    if revision!=int(respondent.get("revision") or 0)+1:raise HTTPException(409,{"code":"stale_revision","current_revision":int(respondent.get("revision") or 0)})
     accepted=0;error=None;records=[];session_updates={}
     for item in body.answers:
         try:
@@ -301,8 +319,15 @@ def answer_batch(sid:str,body:AnswerBatch):
             records.append(record);session_updates.update(updates);accepted+=1
         except HTTPException as exc:
             error={"status":exc.status_code,"detail":exc.detail};break
-    if records:persist_answer_batch(sid,records,session_updates)
-    return {"ok":error is None,"accepted":accepted,"rejected":len(body.answers)-accepted,"error":error,"next":next_question(sid)}
+    try:
+        checkpoint=commit_checkpoint(sid,records,session_updates,revision,idempotency_key)
+    except ValueError as exc:
+        raise HTTPException(409,{"code":"stale_revision","detail":str(exc)})
+    except KeyError: raise HTTPException(404,"Không tìm thấy phiên")
+    with connect() as con:con.execute("UPDATE respondents SET revision=? WHERE id=?",(revision,sid))
+    result={"ok":error is None,"committed":True,"replayed":checkpoint["replayed"],"revision":revision,"accepted":accepted,"rejected":len(body.answers)-accepted,"error":error,"next":next_question(sid)}
+    with connect() as con:con.execute("INSERT OR REPLACE INTO sync_checkpoints VALUES(?,?,?,?,?)",(sid,idempotency_key,revision,json.dumps(result,ensure_ascii=False),now()))
+    return result
 
 @app.post("/api/sessions/{sid}/back")
 def previous_question(sid:str):
@@ -459,6 +484,11 @@ def insights(_: None = Depends(admin)):
 
 @app.get("/api/admin/analytics")
 def analytics(_: None = Depends(admin)):
+    current=time.time()
+    if ANALYTICS_CACHE["value"] is not None and ANALYTICS_CACHE["expires"]>current:return ANALYTICS_CACHE["value"]
+    if firestore_enabled():
+        try:project_recent_sessions(int(os.getenv("ANALYTICS_SESSION_PAGE_SIZE","500")))
+        except Exception:logger.exception("Không thể nạp trang dữ liệu analytics từ Firestore")
     respondent_rows=rows("SELECT * FROM respondents ORDER BY started_at DESC")
     answer_rows=rows("SELECT respondent_id,question_id,option_id,value_json,scores_json,answered_at FROM answers")
     question_rows=[hydrated_question(q) for q in rows("SELECT * FROM questions ORDER BY position")]
@@ -502,11 +532,17 @@ def analytics(_: None = Depends(admin)):
             key=respondent.get(field) or "Chưa xác định";result[key]=result.get(key,0)+1
         return [{"label":key,"value":value} for key,value in sorted(result.items(),key=lambda item:item[1],reverse=True)]
     completed=sum(respondent.get("status")=="completed" for respondent in respondent_rows); total=len(respondent_rows)
-    return {"kpis":{"total":total,"completed":completed,"active":total-completed,"completion_rate":round(completed/total*100,1) if total else 0,"answers":len(answer_rows),"average_duration_seconds":round(sum(durations)/len(durations)) if durations else None},"daily":list(sorted(daily.values(),key=lambda item:item["date"]))[-30:],"platforms":grouped("platform"),"products":grouped("product"),"variables":[{"code":code,"average":round(sum(values)/len(values),2),"responses":len(values)} for code,values in sorted(variable_values.items(),key=lambda item:sum(item[1])/len(item[1]),reverse=True)],"questions":questions,"respondents":respondent_summaries}
+    result={"kpis":{"total":total,"completed":completed,"active":total-completed,"completion_rate":round(completed/total*100,1) if total else 0,"answers":len(answer_rows),"average_duration_seconds":round(sum(durations)/len(durations)) if durations else None},"daily":list(sorted(daily.values(),key=lambda item:item["date"]))[-30:],"platforms":grouped("platform"),"products":grouped("product"),"variables":[{"code":code,"average":round(sum(values)/len(values),2),"responses":len(values)} for code,values in sorted(variable_values.items(),key=lambda item:sum(item[1])/len(item[1]),reverse=True)],"questions":questions,"respondents":respondent_summaries}
+    ANALYTICS_CACHE.update(value=result,expires=current+15)
+    return result
 
 @app.get("/api/admin/respondents/{sid}/answers")
 def respondent_answers(sid:str, _: None = Depends(admin)):
     respondent=row("SELECT * FROM respondents WHERE id=?",(sid,))
+    if not respondent and firestore_enabled():
+        try:project_session(sid)
+        except Exception:logger.exception("Không thể lazy-load respondent %s",sid)
+        respondent=row("SELECT * FROM respondents WHERE id=?",(sid,))
     if not respondent: raise HTTPException(404,"Không tìm thấy người trả lời")
     answer_rows=rows("SELECT question_id,option_id,value_json,scores_json,answered_at FROM answers WHERE respondent_id=? ORDER BY answered_at",(sid,))
     question_map={question["id"]:question for question in [hydrated_question(q) for q in rows("SELECT * FROM questions ORDER BY position")]}

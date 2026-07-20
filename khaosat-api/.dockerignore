@@ -1,0 +1,10 @@
+.env
+*.json
+survey.db*
+backups/
+media/
+venv/
+.venv/
+__pycache__/
+.pytest_cache/
+tests/

@@ -70,6 +70,89 @@ def persist_answer_batch(sid, records, session_updates=None):
         _backup("session.updated", {"id": sid, **session_updates})
 
 
+def commit_checkpoint(sid, records, session_updates, revision, idempotency_key):
+    """Commit a retry-safe client checkpoint in one Firestore transaction."""
+    if not firestore_enabled():
+        return {"replayed": False, "revision": revision}
+    ref = _client().collection("survey_sessions").document(sid)
+    transaction = _client().transaction()
+
+    @firestore.transactional
+    def commit(tx):
+        snapshot = ref.get(transaction=tx, timeout=FIRESTORE_TIMEOUT)
+        if not snapshot.exists:
+            raise KeyError(sid)
+        current = snapshot.to_dict() or {}
+        checkpoints = current.get("checkpoints") or {}
+        if idempotency_key in checkpoints:
+            return {"replayed": True, "revision": int(checkpoints[idempotency_key])}
+        current_revision = int(current.get("revision") or 0)
+        if revision != current_revision + 1:
+            raise ValueError(f"stale_revision:{current_revision}")
+        updates = {f'answers.{record["question_id"]}': record for record in records}
+        updates.update(session_updates or {})
+        updates["revision"] = revision
+        updates[f"checkpoints.{idempotency_key}"] = revision
+        tx.update(ref, updates)
+        return {"replayed": False, "revision": revision}
+
+    result = commit(transaction)
+    if not result["replayed"]:
+        for record in records:
+            _backup("answer.created", {"respondent_id": sid, **record})
+        _backup("checkpoint.committed", {"id": sid, "revision": revision, "idempotency_key": idempotency_key})
+    return result
+
+
+def load_session(sid):
+    """Read only one session on demand; never scan the whole collection at boot."""
+    if not firestore_enabled():
+        return None
+    snapshot = _client().collection("survey_sessions").document(sid).get(timeout=FIRESTORE_TIMEOUT)
+    return snapshot.to_dict() if snapshot.exists else None
+
+
+def project_session(sid):
+    data = load_session(sid)
+    if not data:
+        return None
+    with connect() as con:
+        con.execute("""INSERT OR REPLACE INTO respondents
+            (id,name,email,consent,product,platform,theme,started_at,completed_at,status,revision)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(sid,data.get("name"),data.get("email"),int(data.get("consent",True)),data.get("product"),data.get("platform"),data.get("theme","rose"),data.get("started_at"),data.get("completed_at"),data.get("status","active"),int(data.get("revision") or 0)))
+        for qid,item in (data.get("answers") or {}).items():
+            con.execute("""INSERT OR REPLACE INTO answers
+                (respondent_id,question_id,option_id,value_json,scores_json,answered_at)
+                VALUES(?,?,?,?,?,?)""",(sid,qid,item["option_id"],json.dumps(item.get("value"),ensure_ascii=False),json.dumps(item.get("scores",{})),item.get("answered_at")))
+        for qid,item in (data.get("skipped") or {}).items():
+            con.execute("INSERT OR REPLACE INTO skipped VALUES(?,?,?,?,?)",(sid,qid,json.dumps(item.get("variables",[])),item.get("reason"),item.get("created_at")))
+    return data
+
+
+def project_recent_sessions(limit=500):
+    """Hydrate a bounded admin read page, never an unbounded startup scan."""
+    if not firestore_enabled():
+        return 0
+    snapshots = (_client().collection("survey_sessions")
+        .order_by("started_at", direction=firestore.Query.DESCENDING)
+        .limit(max(1, min(int(limit), 1000))).stream(timeout=FIRESTORE_TIMEOUT))
+    projected = 0
+    for snapshot in snapshots:
+        # project_session performs one extra read, so project the already fetched
+        # payload directly through the same local upsert path via a small helper.
+        data=snapshot.to_dict();sid=snapshot.id
+        with connect() as con:
+            con.execute("""INSERT OR REPLACE INTO respondents
+                (id,name,email,consent,product,platform,theme,started_at,completed_at,status,revision)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(sid,data.get("name"),data.get("email"),int(data.get("consent",True)),data.get("product"),data.get("platform"),data.get("theme","rose"),data.get("started_at"),data.get("completed_at"),data.get("status","active"),int(data.get("revision") or 0)))
+            for qid,item in (data.get("answers") or {}).items():
+                con.execute("""INSERT OR REPLACE INTO answers
+                    (respondent_id,question_id,option_id,value_json,scores_json,answered_at)
+                    VALUES(?,?,?,?,?,?)""",(sid,qid,item["option_id"],json.dumps(item.get("value"),ensure_ascii=False),json.dumps(item.get("scores",{})),item.get("answered_at")))
+        projected+=1
+    return projected
+
+
 def persist_session_update(sid, values):
     if firestore_enabled():
         _client().collection("survey_sessions").document(sid).set(values, merge=True, timeout=FIRESTORE_TIMEOUT)
