@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from app import database
 from app.database import init_db, row, connect
 from app.excel_import import import_workbook
-from app.main import Start, Answer, AnswerBatch, start, next_question, survey_manifest, answer, answer_batch, previous_question, password_hash, password_ok
+from app.main import Start, Answer, AnswerBatch, start, next_question, survey_manifest, answer, answer_batch, previous_question, password_hash, password_ok, startup
 
 class SurveySecurityTests(unittest.TestCase):
     @classmethod
@@ -68,6 +68,11 @@ class SurveySecurityTests(unittest.TestCase):
             result=answer_batch(sid,AnswerBatch(answers=[Answer(question_id=first["id"],option_id=first["options"][0]["id"],value="Checkpoint")]))
         self.assertEqual(result["accepted"],1)
         checkpoint.assert_called_once()
+
+    def test_firestore_restore_failure_does_not_crash_startup(self):
+        with patch("app.main.initialize_firebase"), patch("app.main.firestore_enabled",return_value=True), patch("app.main.restore_projection",side_effect=RuntimeError("quota")):
+            startup()
+        self.assertIsNotNone(row("SELECT value FROM settings WHERE key='last_import'"))
 
     def test_pilot_mode_disables_heuristic_skip(self):
         with connect() as con:con.execute("INSERT OR REPLACE INTO settings VALUES('pilot_mode','true')")

@@ -1,4 +1,4 @@
-import csv, io, json, os, uuid, hashlib, secrets, time, shutil
+import csv, io, json, os, uuid, hashlib, secrets, time, shutil, logging
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Union
@@ -27,6 +27,7 @@ BACKUP_DIR=Path(__file__).resolve().parents[1]/"backups"; BACKUP_DIR.mkdir(exist
 app.mount("/media",StaticFiles(directory=MEDIA_DIR),name="media")
 RATE_BUCKETS={}
 RATE_LAST_CLEANUP=0.0
+logger=logging.getLogger(__name__)
 
 def now(): return datetime.now(timezone.utc).isoformat()
 def participant_name(sid, value=None):
@@ -75,7 +76,15 @@ async def rate_limit(request:Request,call_next):
 def startup():
     init_db()
     initialize_firebase()
-    if firestore_enabled(): restore_projection()
+    if firestore_enabled():
+        try:
+            restored=restore_projection()
+            logger.info("Firestore projection restored: %s",restored)
+        except Exception:
+            # Firestore quota/network failure must not prevent Uvicorn from
+            # opening its port. New requests can return a controlled error
+            # while health/configuration endpoints remain available.
+            logger.exception("Không thể dựng projection từ Firestore; backend tiếp tục khởi động")
     if not row("SELECT id FROM admin_users LIMIT 1"):
         username=os.getenv("ADMIN_USERNAME","admin")
         password=os.getenv("ADMIN_PASSWORD","admin123")
