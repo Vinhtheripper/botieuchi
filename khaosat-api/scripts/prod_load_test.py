@@ -24,7 +24,7 @@ class Metrics:
             self.latencies.append(latency)
 
 
-def request_json(base, method, path, metrics, body=None, timeout=30):
+def request_json(base, method, path, metrics, body=None, timeout=120):
     payload = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
         base + path,
@@ -45,6 +45,9 @@ def request_json(base, method, path, metrics, body=None, timeout=30):
         except Exception:
             detail = {"detail": str(exc)}
         return exc.code, detail
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        metrics.add(0, time.perf_counter() - started)
+        return 0, {"detail": f"{type(exc).__name__}: {exc}"}
 
 
 def percentile(values, percentage):
@@ -92,7 +95,7 @@ def run_form(index, base, manifest, metrics):
         if position is None:
             return {"index": index, "id": sid, "ok": False, "stage": "manifest", "question": question["id"]}
         batch = []
-        for candidate in ordered[position:position + 6]:
+        for candidate in ordered[position:position + 10]:
             options = candidate.get("options") or []
             if not options:
                 break
@@ -160,8 +163,13 @@ def main():
         for index in range(args.forms):
             futures.append(pool.submit(run_form, index, args.base, manifest, metrics))
             time.sleep(args.start_interval)
-        for future in concurrent.futures.as_completed(futures):
-            results.append(future.result())
+        for completed_count,future in enumerate(concurrent.futures.as_completed(futures),1):
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                results.append({"index":None,"ok":False,"stage":"client-exception","detail":f"{type(exc).__name__}: {exc}"})
+            if completed_count % 25 == 0 or completed_count == args.forms:
+                print(f"progress={completed_count}/{args.forms}",flush=True)
     elapsed = time.perf_counter() - started
     success = [item for item in results if item["ok"]]
     failed = [item for item in results if not item["ok"]]
