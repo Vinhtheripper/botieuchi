@@ -50,18 +50,24 @@ def persist_session(record):
 
 def persist_answer(sid, record):
     if firestore_enabled():
-        ref = _client().collection("survey_sessions").document(sid).collection("answers").document(record["question_id"])
-        try:
-            ref.create(record, timeout=FIRESTORE_TIMEOUT)
-        except Exception as exc:
-            if "AlreadyExists" in type(exc).__name__ or "already exists" in str(exc).lower():
-                existing=ref.get(timeout=FIRESTORE_TIMEOUT).to_dict() or {}
-                if existing.get("option_id")==record.get("option_id") and existing.get("value")==record.get("value"):
-                    return False
-                raise DuplicateAnswer from exc
-            raise
+        ref = _client().collection("survey_sessions").document(sid)
+        ref.update({f'answers.{record["question_id"]}': record}, timeout=FIRESTORE_TIMEOUT)
     _backup("answer.created", {"respondent_id": sid, **record})
     return True
+
+
+def persist_answer_batch(sid, records, session_updates=None):
+    """Persist one client checkpoint with exactly one Firestore document write."""
+    if not records and not session_updates:
+        return
+    if firestore_enabled():
+        updates = {f'answers.{record["question_id"]}': record for record in records}
+        updates.update(session_updates or {})
+        _client().collection("survey_sessions").document(sid).update(updates, timeout=FIRESTORE_TIMEOUT)
+    for record in records:
+        _backup("answer.created", {"respondent_id": sid, **record})
+    if session_updates:
+        _backup("session.updated", {"id": sid, **session_updates})
 
 
 def persist_session_update(sid, values):
@@ -73,7 +79,7 @@ def persist_session_update(sid, values):
 def persist_skip(sid, qid, variables, reason, created_at):
     record={"question_id":qid,"variables":variables,"reason":reason,"created_at":created_at}
     if firestore_enabled():
-        _client().collection("survey_sessions").document(sid).collection("skipped").document(qid).set(record, timeout=FIRESTORE_TIMEOUT)
+        _client().collection("survey_sessions").document(sid).update({f"skipped.{qid}":record}, timeout=FIRESTORE_TIMEOUT)
     _backup("question.skipped", {"respondent_id":sid,**record})
 
 
@@ -81,9 +87,7 @@ def rollback_remote_answer(sid, qid):
     """Remove one answer and derived skips so the route can be calculated again."""
     if firestore_enabled():
         session=_client().collection("survey_sessions").document(sid)
-        session.collection("answers").document(qid).delete(timeout=FIRESTORE_TIMEOUT)
-        for snapshot in session.collection("skipped").stream():
-            snapshot.reference.delete(timeout=FIRESTORE_TIMEOUT)
+        session.update({f"answers.{qid}":firestore.DELETE_FIELD,"skipped":{}},timeout=FIRESTORE_TIMEOUT)
     _backup("answer.rolled_back", {"respondent_id":sid,"question_id":qid})
 
 
@@ -93,6 +97,13 @@ def restore_projection():
         return {"sessions": 0, "answers": 0}
     session_count=answer_count=0
     client=_client()
+    # Firestore là nguồn chính: projection cục bộ phải phản ánh đúng dữ liệu hiện có,
+    # không giữ respondent cũ sau khi collection đã được dọn.
+    with connect() as con:
+        con.execute("DELETE FROM question_timing")
+        con.execute("DELETE FROM skipped")
+        con.execute("DELETE FROM answers")
+        con.execute("DELETE FROM respondents")
     for snapshot in client.collection("survey_sessions").stream():
         data=snapshot.to_dict();sid=snapshot.id
         with connect() as con:
@@ -100,15 +111,12 @@ def restore_projection():
                 (id,name,email,consent,product,platform,theme,started_at,completed_at,status)
                 VALUES(?,?,?,?,?,?,?,?,?,?)""",(sid,data.get("name"),data.get("email"),int(data.get("consent",True)),data.get("product"),data.get("platform"),data.get("theme","rose"),data.get("started_at"),data.get("completed_at"),data.get("status","active")))
         session_count+=1
-    for answer in client.collection_group("answers").stream():
-        item=answer.to_dict();sid=answer.reference.parent.parent.id
         with connect() as con:
-            con.execute("""INSERT OR IGNORE INTO answers
-                (respondent_id,question_id,option_id,value_json,scores_json,answered_at)
-                VALUES(?,?,?,?,?,?)""",(sid,item["question_id"],item["option_id"],json.dumps(item.get("value"),ensure_ascii=False),json.dumps(item.get("scores",{})),item.get("answered_at")))
-        answer_count+=1
-    for skipped in client.collection_group("skipped").stream():
-        item=skipped.to_dict();sid=skipped.reference.parent.parent.id
-        with connect() as con:
-            con.execute("INSERT OR IGNORE INTO skipped VALUES(?,?,?,?,?)",(sid,item["question_id"],json.dumps(item.get("variables",[])),item.get("reason"),item.get("created_at")))
+            for qid,item in (data.get("answers") or {}).items():
+                con.execute("""INSERT OR IGNORE INTO answers
+                    (respondent_id,question_id,option_id,value_json,scores_json,answered_at)
+                    VALUES(?,?,?,?,?,?)""",(sid,qid,item["option_id"],json.dumps(item.get("value"),ensure_ascii=False),json.dumps(item.get("scores",{})),item.get("answered_at")))
+                answer_count+=1
+            for qid,item in (data.get("skipped") or {}).items():
+                con.execute("INSERT OR IGNORE INTO skipped VALUES(?,?,?,?,?)",(sid,qid,json.dumps(item.get("variables",[])),item.get("reason"),item.get("created_at")))
     return {"sessions":session_count,"answers":answer_count}

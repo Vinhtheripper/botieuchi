@@ -16,7 +16,7 @@ from .excel_import import import_workbook
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 from .firebase import initialize_firebase
-from .storage import DuplicateAnswer, firestore_enabled, persist_answer, persist_session, persist_session_update, persist_skip, restore_projection, rollback_remote_answer
+from .storage import DuplicateAnswer, firestore_enabled, persist_answer, persist_answer_batch, persist_session, persist_session_update, persist_skip, restore_projection, rollback_remote_answer
 
 ALLOWED_ORIGINS=[origin.strip() for origin in os.getenv("ALLOWED_ORIGINS","http://localhost:5173").split(",") if origin.strip()]
 app = FastAPI(title="GROUP2 Survey API", version="1.0.0")
@@ -112,7 +112,7 @@ class AnswerBatch(BaseModel):
 @app.post("/api/sessions")
 def start(body: Start):
     sid = str(uuid.uuid4())
-    created_at=now();name=participant_name(sid,body.name);record={"id":sid,"name":name,"email":body.email,"consent":bool(body.consent),"theme":"rose","started_at":created_at,"completed_at":None,"status":"active"}
+    created_at=now();name=participant_name(sid,body.name);record={"id":sid,"name":name,"email":body.email,"consent":bool(body.consent),"theme":"rose","started_at":created_at,"completed_at":None,"status":"active","answers":{},"skipped":{}}
     persist_session(record)
     with connect() as con: con.execute("INSERT INTO respondents(id,name,email,consent,theme,started_at,status) VALUES(?,?,?,?,?,?,?)",(sid,name,body.email,int(body.consent),"rose",created_at,"active"))
     return {"id": sid}
@@ -232,15 +232,17 @@ def survey_manifest(sid:str):
     version=row("SELECT value FROM settings WHERE key='last_import'")
     return {"version":version["value"] if version else "1","questions":questions,"branches":branches}
 
-@app.post("/api/sessions/{sid}/answers")
-def answer(sid: str, body: Answer):
+def process_answer(sid: str, body: Answer, persist_remote=True, include_next=True):
     respondent=row("SELECT * FROM respondents WHERE id=?",(sid,))
     if not respondent: raise HTTPException(404,"Không tìm thấy phiên")
     if respondent["status"] == "completed": raise HTTPException(409,"Phiên khảo sát đã khóa sau khi hoàn thành")
-    existing=row("SELECT option_id,value_json FROM answers WHERE respondent_id=? AND question_id=?",(sid,body.question_id))
+    existing=row("SELECT option_id,value_json,scores_json,answered_at FROM answers WHERE respondent_id=? AND question_id=?",(sid,body.question_id))
     if existing:
         previous_value=json.loads(existing["value_json"] or "null")
-        if str(existing["option_id"])==str(body.option_id) and previous_value==body.value:return {"ok":True,"replayed":True,"next":next_question(sid)}
+        if str(existing["option_id"])==str(body.option_id) and previous_value==body.value:
+            record={"question_id":body.question_id,"option_id":existing["option_id"],"value":previous_value,"scores":json.loads(existing["scores_json"] or "{}"),"answered_at":existing["answered_at"],"duration_ms":body.duration_ms}
+            if persist_remote:persist_answer(sid,record)
+            return record,{},next_question(sid) if include_next else None,True
         raise HTTPException(409,"Đáp án đã được ghi nhận và không thể chỉnh sửa")
     expected=next_question(sid)
     if expected.get("done") or expected.get("question",{}).get("id") != body.question_id:
@@ -255,14 +257,15 @@ def answer(sid: str, body: Answer):
         try: duration=int((datetime.now(timezone.utc)-datetime.fromisoformat(timing["shown_at"])).total_seconds()*1000)
         except Exception: pass
     remote_record={"question_id":body.question_id,"option_id":body.option_id,"value":body.value,"scores":option.get("scores",{}),"answered_at":answered_at,"duration_ms":duration}
-    try:persist_answer(sid,remote_record)
-    except DuplicateAnswer:raise HTTPException(409,"Đáp án đã được ghi nhận và không thể chỉnh sửa")
+    if persist_remote:
+        try:persist_answer(sid,remote_record)
+        except DuplicateAnswer:raise HTTPException(409,"Đáp án đã được ghi nhận và không thể chỉnh sửa")
     session_updates={}
     if body.question_id=="P00" and isinstance(body.value,str) and body.value.strip():session_updates["name"]=body.value.strip()
     if body.question_id in ("P01a","P01b"):session_updates["product"]=option["label"]
     if body.question_id=="P01c":session_updates["theme"]=option.get("theme","rose")
     if body.question_id=="P02":session_updates["platform"]=option["label"]
-    if session_updates:persist_session_update(sid,session_updates)
+    if session_updates and persist_remote:persist_session_update(sid,session_updates)
     with connect() as con:
         con.execute("INSERT INTO answers(respondent_id,question_id,option_id,value_json,scores_json,answered_at) VALUES(?,?,?,?,?,?)",(sid,body.question_id,body.option_id,json.dumps(body.value,ensure_ascii=False),json.dumps(option.get("scores",{})),answered_at))
         if body.question_id=="P00" and isinstance(body.value, str) and body.value.strip(): con.execute("UPDATE respondents SET name=? WHERE id=?",(body.value.strip(),sid))
@@ -272,16 +275,24 @@ def answer(sid: str, body: Answer):
         if body.question_id=="P02": con.execute("UPDATE respondents SET platform=? WHERE id=?",(option["label"],sid))
         if timing:
             con.execute("UPDATE question_timing SET answered_at=?,duration_ms=? WHERE respondent_id=? AND question_id=?",(answered_at,duration,sid,body.question_id))
-    return {"ok":True,"next":next_question(sid)}
+    return remote_record,session_updates,next_question(sid) if include_next else None,False
+
+@app.post("/api/sessions/{sid}/answers")
+def answer(sid: str, body: Answer):
+    _,_,next_result,replayed=process_answer(sid,body)
+    return {"ok":True,"replayed":replayed,"next":next_result}
 
 @app.post("/api/sessions/{sid}/answers/batch")
 def answer_batch(sid:str,body:AnswerBatch):
     if len(body.answers)>10:raise HTTPException(422,"Mỗi batch tối đa 10 câu trả lời")
-    accepted=0;error=None
+    accepted=0;error=None;records=[];session_updates={}
     for item in body.answers:
-        try:answer(sid,item);accepted+=1
+        try:
+            record,updates,_,_=process_answer(sid,item,persist_remote=False,include_next=False)
+            records.append(record);session_updates.update(updates);accepted+=1
         except HTTPException as exc:
             error={"status":exc.status_code,"detail":exc.detail};break
+    if records:persist_answer_batch(sid,records,session_updates)
     return {"ok":error is None,"accepted":accepted,"rejected":len(body.answers)-accepted,"error":error,"next":next_question(sid)}
 
 @app.post("/api/sessions/{sid}/back")

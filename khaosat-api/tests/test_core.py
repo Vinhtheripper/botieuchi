@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from fastapi import HTTPException
 from app import database
@@ -60,6 +61,13 @@ class SurveySecurityTests(unittest.TestCase):
         first=next_question(sid)["question"]
         result=answer_batch(sid,AnswerBatch(answers=[Answer(question_id=first["id"],option_id=first["options"][0]["id"],value="Batch")]))
         self.assertEqual(result["accepted"],1);self.assertEqual(result["next"]["answered"],1)
+
+    def test_batch_uses_one_remote_checkpoint(self):
+        sid=self.new_session();first=next_question(sid)["question"]
+        with patch("app.main.persist_answer_batch") as checkpoint:
+            result=answer_batch(sid,AnswerBatch(answers=[Answer(question_id=first["id"],option_id=first["options"][0]["id"],value="Checkpoint")]))
+        self.assertEqual(result["accepted"],1)
+        checkpoint.assert_called_once()
 
     def test_pilot_mode_disables_heuristic_skip(self):
         with connect() as con:con.execute("INSERT OR REPLACE INTO settings VALUES('pilot_mode','true')")
