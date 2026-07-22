@@ -1,4 +1,5 @@
 import tempfile
+import json
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -6,7 +7,7 @@ from fastapi import HTTPException
 from app import database
 from app.database import init_db, row, connect
 from app.excel_import import import_workbook
-from app.main import Start, Answer, AnswerBatch, start, next_question, survey_manifest, answer, answer_batch, previous_question, password_hash, password_ok, startup
+from app.main import Start, Answer, AnswerBatch, start, next_question, public_manifest, survey_manifest, answer, answer_batch, previous_question, password_hash, password_ok, startup
 
 class SurveySecurityTests(unittest.TestCase):
     @classmethod
@@ -29,7 +30,7 @@ class SurveySecurityTests(unittest.TestCase):
     def test_hidden_scores_never_reach_browser(self):
         q=next_question(self.new_session())["question"]
         self.assertNotIn("scores",q["options"][0])
-        self.assertEqual(q["variables"],[])
+        self.assertNotIn("variables",q)
 
     def test_answer_cannot_be_overwritten_or_sent_out_of_order(self):
         sid=self.new_session();q=next_question(sid)["question"]
@@ -81,6 +82,35 @@ class SurveySecurityTests(unittest.TestCase):
         first_result=answer_batch(sid,body);second_result=answer_batch(sid,body)
         self.assertTrue(first_result["committed"]);self.assertEqual(second_result,first_result)
         self.assertEqual(row("SELECT COUNT(*) AS n FROM answers WHERE respondent_id=?",(sid,))["n"],1)
+
+    def test_client_session_creation_is_idempotent(self):
+        import uuid
+        sid=str(uuid.uuid4());body=Start(id=sid,name="Ẩn danh",consent=True,manifest_version="test")
+        first=start(body);second=start(body)
+        self.assertEqual(first["id"],sid);self.assertTrue(second["replayed"])
+        self.assertEqual(row("SELECT COUNT(*) AS n FROM respondents WHERE id=?",(sid,))["n"],1)
+
+    def test_bundled_manifest_matches_backend_and_has_no_scoring(self):
+        path=Path(__file__).resolve().parents[2]/"khaosat-web"/"public"/"survey-manifest.json"
+        bundled=json.loads(path.read_text(encoding="utf-8"));expected=public_manifest()
+        self.assertEqual(bundled["questions"],expected["questions"])
+        self.assertEqual(bundled["branches"],expected["branches"])
+        serialized=json.dumps(bundled,ensure_ascii=False)
+        for forbidden in ('"scores"','"variables"','"weights"','"note"'):self.assertNotIn(forbidden,serialized)
+
+    def test_frontend_product_and_theme_personalization_matches_backend(self):
+        manifest=public_manifest();question_map={q["id"]:q for q in manifest["questions"]}
+        category_options=question_map["P01b"]["options"]
+        for index,category in enumerate(("Thời trang","Mỹ phẩm","Công nghệ","Gia dụng")):
+            source=category_options[index]["label"]
+            frontend=[{"id":chr(65+i),"label":label.strip()} for i,label in enumerate(source.split(":",1)[-1].split("·"))]
+            frontend.append({"id":"F","label":"Món khác trong nhóm này"})
+            raw=row("SELECT * FROM questions WHERE id='P01b'")
+            backend=__import__('app.main',fromlist=['hydrated_question']).hydrated_question(raw,{"id":"preview","product":category,"name":"bạn"})
+            self.assertEqual(frontend,[{"id":item["id"],"label":item["label"]} for item in backend["options"]])
+        raw=row("SELECT * FROM questions WHERE id='P01c'")
+        internal=__import__('app.main',fromlist=['hydrated_question']).hydrated_question(raw)
+        self.assertEqual({item["id"]:item.get("theme","rose") for item in internal["options"]},{"A":"rose","B":"mint","C":"sunset","D":"lavender"})
 
     def test_pilot_mode_disables_heuristic_skip(self):
         with connect() as con:con.execute("INSERT OR REPLACE INTO settings VALUES('pilot_mode','true')")

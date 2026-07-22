@@ -97,9 +97,12 @@ def admin_login(body:Login,request:Request):
     return {"token":token,"user":{"username":user["username"],"role":user["role"]},"expires_at":expires.isoformat()}
 
 class Start(BaseModel):
+    id: Optional[str] = None
     name: str = "Ẩn danh"
     email: Optional[str] = None
     consent: bool = True
+    started_at: Optional[str] = None
+    manifest_version: Optional[str] = None
 
 class Answer(BaseModel):
     question_id: str
@@ -114,11 +117,22 @@ class AnswerBatch(BaseModel):
 
 @app.post("/api/sessions")
 def start(body: Start):
-    sid = str(uuid.uuid4())
-    created_at=now();name=participant_name(sid,body.name);record={"id":sid,"name":name,"email":body.email,"consent":bool(body.consent),"theme":"rose","started_at":created_at,"completed_at":None,"status":"active","revision":0,"checkpoints":{},"answers":{},"skipped":{}}
-    persist_session(record)
-    with connect() as con: con.execute("INSERT INTO respondents(id,name,email,consent,theme,started_at,status) VALUES(?,?,?,?,?,?,?)",(sid,name,body.email,int(body.consent),"rose",created_at,"active"))
-    return {"id": sid}
+    sid = body.id or str(uuid.uuid4())
+    try:uuid.UUID(sid)
+    except ValueError:raise HTTPException(422,"Session ID không hợp lệ")
+    existing=row("SELECT id FROM respondents WHERE id=?",(sid,))
+    if existing:return {"id":sid,"replayed":True}
+    if firestore_enabled():
+        try:
+            if project_session(sid):return {"id":sid,"replayed":True}
+        except Exception:logger.exception("Không thể kiểm tra session %s",sid)
+    created_at=body.started_at or now();name=participant_name(sid,body.name);record={"id":sid,"name":name,"email":body.email,"consent":bool(body.consent),"theme":"rose","started_at":created_at,"completed_at":None,"status":"active","manifest_version":body.manifest_version,"revision":0,"checkpoints":{},"answers":{},"skipped":{}}
+    try:persist_session(record)
+    except Exception:
+        if firestore_enabled() and project_session(sid):return {"id":sid,"replayed":True}
+        raise
+    with connect() as con: con.execute("INSERT OR IGNORE INTO respondents(id,name,email,consent,theme,started_at,status) VALUES(?,?,?,?,?,?,?)",(sid,name,body.email,int(body.consent),"rose",created_at,"active"))
+    return {"id": sid,"replayed":False}
 
 def hydrated_question(q, respondent=None):
     q=decode(q,"variables_json","options_json")
@@ -163,7 +177,7 @@ def public_question(q):
     """Không bao giờ gửi hidden-scoring xuống trình duyệt/F12."""
     safe=dict(q)
     safe["options"]=[{"id":o["id"],"label":o["label"],**({"image_url":o["image_url"]} if o.get("image_url") else {})} for o in q["options"]]
-    safe["variables"]=[]
+    safe.pop("variables",None)
     safe.pop("note",None)
     return safe
 
@@ -231,14 +245,27 @@ def next_question(sid: str):
     result=score_result(sid);result["name"]=respondent.get("name") if respondent.get("name") not in (None,"bạn","Ẩn danh") else None
     return {"done":True,"progress":100,"result":result}
 
+def public_manifest():
+    questions=[public_question(hydrated_question(question)) for question in rows("SELECT * FROM questions WHERE active=1 ORDER BY position")]
+    branches=rows("SELECT source_question,target_question,operator,expected_value,action FROM branch_rules WHERE active=1")
+    version=row("SELECT value FROM settings WHERE key='manifest_version'") or row("SELECT value FROM settings WHERE key='last_import'")
+    return {"version":version["value"] if version else "1","questions":questions,"branches":branches}
+
+def bump_manifest_version():
+    version=now()
+    with connect() as con:con.execute("INSERT OR REPLACE INTO settings VALUES('manifest_version',?)",(version,))
+    return version
+
+@app.get("/api/manifest")
+def manifest_endpoint(response:Response):
+    response.headers["Cache-Control"]="public, max-age=300, stale-while-revalidate=86400"
+    return public_manifest()
+
 @app.get("/api/sessions/{sid}/manifest")
 def survey_manifest(sid:str,response:Response=None):
     if not row("SELECT id FROM respondents WHERE id=?",(sid,)):raise HTTPException(404,"Không tìm thấy phiên")
     if response is not None:response.headers["Cache-Control"]="public, max-age=300, stale-while-revalidate=86400"
-    questions=[public_question(hydrated_question(question)) for question in rows("SELECT * FROM questions WHERE active=1 ORDER BY position")]
-    branches=rows("SELECT source_question,target_question,operator,expected_value,action FROM branch_rules WHERE active=1")
-    version=row("SELECT value FROM settings WHERE key='last_import'")
-    return {"version":version["value"] if version else "1","questions":questions,"branches":branches}
+    return public_manifest()
 
 def process_answer(sid: str, body: Answer, persist_remote=True, include_next=True):
     respondent=row("SELECT * FROM respondents WHERE id=?",(sid,))
@@ -391,7 +418,7 @@ def dashboard(_: None = Depends(admin)):
 
 @app.post("/api/admin/import")
 def reimport(user = Depends(editor)):
-    result=import_workbook();audit(user,"import","workbook",detail=result);return result
+    result=import_workbook();result["manifest_version"]=bump_manifest_version();audit(user,"import","workbook",detail=result);return result
 
 @app.get("/api/admin/sheets")
 def sheets(_: None = Depends(admin)):
@@ -412,7 +439,7 @@ class UpdateQuestion(BaseModel):
 def update_question(qid:str, body:UpdateQuestion, user=Depends(editor)):
     with connect() as con:
         con.execute("UPDATE questions SET text=?,active=?,phase=?,kind=?,position=?,variables_json=?,options_json=?,note=? WHERE id=?",(body.text,int(body.active),body.phase,body.kind,body.position,json.dumps(body.variables),json.dumps(body.options,ensure_ascii=False),body.note,qid))
-    audit(user,"update","question",qid,body.model_dump());return {"ok":True}
+    version=bump_manifest_version();audit(user,"update","question",qid,body.model_dump());return {"ok":True,"manifest_version":version}
 
 @app.post("/api/admin/questions")
 def create_question(body: UpdateQuestion, user = Depends(editor)):
@@ -420,12 +447,12 @@ def create_question(body: UpdateQuestion, user = Depends(editor)):
     with connect() as con:
         try: con.execute("INSERT INTO questions(id,position,phase,kind,text,variables_json,options_json,note,active) VALUES(?,?,?,?,?,?,?,?,?)",(qid,body.position,body.phase,body.kind,body.text,json.dumps(body.variables),json.dumps(body.options,ensure_ascii=False),body.note,int(body.active)))
         except Exception: raise HTTPException(409,"Mã câu hỏi đã tồn tại")
-    audit(user,"create","question",qid,body.model_dump());return {"ok":True,"id":qid}
+    version=bump_manifest_version();audit(user,"create","question",qid,body.model_dump());return {"ok":True,"id":qid,"manifest_version":version}
 
 @app.delete("/api/admin/questions/{qid}")
 def delete_question(qid: str, user = Depends(editor)):
     with connect() as con: con.execute("DELETE FROM questions WHERE id=?",(qid,))
-    audit(user,"delete","question",qid);return {"ok":True}
+    version=bump_manifest_version();audit(user,"delete","question",qid);return {"ok":True,"manifest_version":version}
 
 class SheetRow(BaseModel):
     values: list[Union[str, int, float, None]]

@@ -6,7 +6,7 @@ import {API_BASE_URL} from './config'
 const session=createSlice({name:'session',initialState:{id:localStorage.getItem('survey_session') as string|null},reducers:{setSession(s,a:PayloadAction<string|null>){s.id=a.payload;a.payload?localStorage.setItem('survey_session',a.payload):localStorage.removeItem('survey_session')}}})
 export const {setSession}=session.actions
 export const api=createApi({reducerPath:'api',baseQuery:fetchBaseQuery({baseUrl:API_BASE_URL,prepareHeaders(h){const token=sessionStorage.getItem('admin_token');if(token)h.set('authorization',`Bearer ${token}`);return h}}),tagTypes:['Dashboard','Next'],endpoints:b=>({
- start:b.mutation<{id:string},{name:string;email?:string;consent:boolean}>({query:body=>({url:'sessions',method:'POST',body})}),
+ start:b.mutation<{id:string;replayed:boolean},{id?:string;name:string;email?:string;consent:boolean;started_at?:string;manifest_version?:string}>({query:body=>({url:'sessions',method:'POST',body})}),
  next:b.query<Next,string>({query:id=>`sessions/${id}/next`,providesTags:['Next']}),
  manifest:b.query<Manifest,string>({query:id=>`sessions/${id}/manifest`}),
  answer:b.mutation<{ok:boolean;replayed?:boolean;next?:Next},{id:string;question_id:string;option_id:string;value?:string}>({query:({id,...body})=>({url:`sessions/${id}/answers`,method:'POST',body}),async onQueryStarted({id},{dispatch,queryFulfilled}){const{data}=await queryFulfilled;if(data.next)dispatch(api.util.updateQueryData('next',id,draft=>Object.assign(draft,data.next)));else dispatch(api.util.invalidateTags(['Next']))}}),

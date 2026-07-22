@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections import Counter
 from datetime import datetime, timezone
 
@@ -60,10 +61,12 @@ def percentile(values, percentage):
 
 def run_form(index, base, manifest, metrics):
     tag = f"LOADTEST-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{index:03d}"
-    status, created = request_json(base, "POST", "/api/sessions", metrics, {"name": tag, "consent": True})
+    client_sid=str(uuid.uuid4())
+    status, created = request_json(base, "POST", "/api/sessions", metrics, {"id":client_sid,"name": tag, "consent": True,"started_at":datetime.now(timezone.utc).isoformat(),"manifest_version":manifest.get("version") if manifest else None})
     if status != 200:
         return {"index": index, "ok": False, "stage": "start", "status": status, "detail": created}
     sid = created["id"]
+    revision=1
     status, current = request_json(base, "GET", f"/api/sessions/{sid}/next", metrics)
     if status != 200:
         return {"index": index, "id": sid, "ok": False, "stage": "next", "status": status, "detail": current}
@@ -104,10 +107,11 @@ def run_form(index, base, manifest, metrics):
                 option = next((item for item in options if item["id"] == themes[index % 4]), option)
             value = tag if candidate["id"] == "P00" else None
             batch.append({"question_id": candidate["id"], "option_id": option["id"], "value": value, "duration_ms": random.randint(700, 6500)})
-        status, result = request_json(base, "POST", f"/api/sessions/{sid}/answers/batch", metrics, {"answers": batch})
+        status, result = request_json(base, "POST", f"/api/sessions/{sid}/answers/batch", metrics, {"revision":revision,"idempotency_key":f"{sid}:{revision}:loadtest","answers": batch})
         if status != 200:
             return {"index": index, "id": sid, "ok": False, "stage": "batch-http", "status": status, "detail": result}
         accepted = int(result.get("accepted", 0))
+        revision=int(result.get("revision",revision))+1
         answered += accepted
         current = result.get("next") or {}
         if accepted == 0 and not current.get("done"):
@@ -117,10 +121,11 @@ def run_form(index, base, manifest, metrics):
                 return {"index": index, "id": sid, "ok": False, "stage": "stalled", "detail": result}
             option = options[index % len(options)]
             one = {"question_id": authoritative["id"], "option_id": option["id"], "value": tag if authoritative["id"] == "P00" else None, "duration_ms": 1200}
-            status, result = request_json(base, "POST", f"/api/sessions/{sid}/answers/batch", metrics, {"answers": [one]})
+            status, result = request_json(base, "POST", f"/api/sessions/{sid}/answers/batch", metrics, {"revision":revision,"idempotency_key":f"{sid}:{revision}:recovery","answers": [one]})
             if status != 200 or result.get("accepted") != 1:
                 return {"index": index, "id": sid, "ok": False, "stage": "recovery", "status": status, "detail": result}
             answered += 1
+            revision=int(result.get("revision",revision))+1
             current = result.get("next") or {}
 
     if not current.get("done"):
