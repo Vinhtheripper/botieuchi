@@ -211,8 +211,7 @@ def branch_skips(sid,qid,snapshot=None):
         if rule["action"]=="show_if" and not match:return True
     return False
 
-@app.get("/api/sessions/{sid}/next")
-def next_question(sid: str):
+def calculate_next_question(sid: str, persist_completion=True):
     respondent=row("SELECT * FROM respondents WHERE id=?",(sid,))
     if not respondent and firestore_enabled():
         try: project_session(sid)
@@ -243,10 +242,16 @@ def next_question(sid: str):
         if q["phase"] in ("Cá nhân hoá","Chuyển chặng","Mua lặp lại","Kết phiên","Nhân khẩu học"):
             context={"product":respondent.get("product"),"platform":respondent.get("platform"),"theme":respondent.get("theme") or "rose"}
         return {"done":False,"question":public_question(q),"progress":round((len(answered)+len(skipped))/total*100),"answered":len(answered),"total":total,"context":context}
-    completed_at=now();persist_session_update(sid,{"completed_at":completed_at,"status":"completed"})
-    with connect() as con: con.execute("UPDATE respondents SET completed_at=?,status='completed' WHERE id=?",(completed_at,sid))
+    completed_at=now()
+    if persist_completion:
+        persist_session_update(sid,{"completed_at":completed_at,"status":"completed"})
+        with connect() as con: con.execute("UPDATE respondents SET completed_at=?,status='completed' WHERE id=?",(completed_at,sid))
     result=score_result(sid);result["name"]=respondent.get("name") if respondent.get("name") not in (None,"bạn","Ẩn danh") else None
-    return {"done":True,"progress":100,"result":result}
+    return {"done":True,"progress":100,"result":result,"completed_at":completed_at}
+
+@app.get("/api/sessions/{sid}/next")
+def next_question(sid: str):
+    return calculate_next_question(sid)
 
 def public_manifest():
     questions=[public_question(hydrated_question(question)) for question in rows("SELECT * FROM questions WHERE active=1 ORDER BY position")]
@@ -349,13 +354,20 @@ def answer_batch(sid:str,body:AnswerBatch):
             records.append(record);session_updates.update(updates);accepted+=1
         except HTTPException as exc:
             error={"status":exc.status_code,"detail":exc.detail};break
+    next_result=calculate_next_question(sid,persist_completion=False)
+    if next_result.get("done"):
+        session_updates.update({"completed_at":next_result["completed_at"],"status":"completed"})
     try:
         checkpoint=commit_checkpoint(sid,records,session_updates,revision,idempotency_key)
     except ValueError as exc:
         raise HTTPException(409,{"code":"stale_revision","detail":str(exc)})
     except KeyError: raise HTTPException(404,"Không tìm thấy phiên")
-    with connect() as con:con.execute("UPDATE respondents SET revision=? WHERE id=?",(revision,sid))
-    result={"ok":error is None,"committed":True,"replayed":checkpoint["replayed"],"revision":revision,"accepted":accepted,"rejected":len(body.answers)-accepted,"error":error,"next":next_question(sid)}
+    with connect() as con:
+        con.execute("UPDATE respondents SET revision=? WHERE id=?",(revision,sid))
+        if next_result.get("done"):
+            con.execute("UPDATE respondents SET completed_at=?,status='completed' WHERE id=?",(next_result["completed_at"],sid))
+    next_result.pop("completed_at",None)
+    result={"ok":error is None,"committed":True,"replayed":checkpoint["replayed"],"revision":revision,"accepted":accepted,"rejected":len(body.answers)-accepted,"error":error,"next":next_result}
     with connect() as con:con.execute("INSERT OR REPLACE INTO sync_checkpoints VALUES(?,?,?,?,?)",(sid,idempotency_key,revision,json.dumps(result,ensure_ascii=False),now()))
     return result
 

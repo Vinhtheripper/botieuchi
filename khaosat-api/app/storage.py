@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from firebase_admin import firestore
+from google.api_core.retry import Retry
 
 from .database import connect
 
@@ -14,6 +15,7 @@ BACKEND = os.getenv("DATA_BACKEND", "sqlite").strip().lower()
 BACKUP_PATH = Path(os.getenv("JSONL_BACKUP_PATH", Path(__file__).resolve().parents[1] / "backups" / "survey-events.jsonl"))
 _backup_lock = threading.Lock()
 FIRESTORE_TIMEOUT = float(os.getenv("FIRESTORE_TIMEOUT_SECONDS", "8"))
+FIRESTORE_RETRY = Retry(deadline=FIRESTORE_TIMEOUT)
 logger = logging.getLogger(__name__)
 
 
@@ -44,14 +46,14 @@ def _backup(event_type, payload):
 
 def persist_session(record):
     if firestore_enabled():
-        _client().collection("survey_sessions").document(record["id"]).create(record, timeout=FIRESTORE_TIMEOUT)
+        _client().collection("survey_sessions").document(record["id"]).create(record, retry=FIRESTORE_RETRY, timeout=FIRESTORE_TIMEOUT)
     _backup("session.created", record)
 
 
 def persist_answer(sid, record):
     if firestore_enabled():
         ref = _client().collection("survey_sessions").document(sid)
-        ref.update({f'answers.{record["question_id"]}': record}, timeout=FIRESTORE_TIMEOUT)
+        ref.update({f'answers.{record["question_id"]}': record}, retry=FIRESTORE_RETRY, timeout=FIRESTORE_TIMEOUT)
     _backup("answer.created", {"respondent_id": sid, **record})
     return True
 
@@ -63,7 +65,7 @@ def persist_answer_batch(sid, records, session_updates=None):
     if firestore_enabled():
         updates = {f'answers.{record["question_id"]}': record for record in records}
         updates.update(session_updates or {})
-        _client().collection("survey_sessions").document(sid).update(updates, timeout=FIRESTORE_TIMEOUT)
+        _client().collection("survey_sessions").document(sid).update(updates, retry=FIRESTORE_RETRY, timeout=FIRESTORE_TIMEOUT)
     for record in records:
         _backup("answer.created", {"respondent_id": sid, **record})
     if session_updates:
@@ -86,7 +88,7 @@ def commit_checkpoint(sid, records, session_updates, revision, idempotency_key):
     updates.update(session_updates or {})
     updates["revision"] = revision
     updates[f"checkpoints.{idempotency_key}"] = revision
-    ref.update(updates, timeout=FIRESTORE_TIMEOUT)
+    ref.update(updates, retry=FIRESTORE_RETRY, timeout=FIRESTORE_TIMEOUT)
     for record in records:
         _backup("answer.created", {"respondent_id": sid, **record})
     _backup("checkpoint.committed", {"id": sid, "revision": revision, "idempotency_key": idempotency_key})
@@ -97,7 +99,7 @@ def load_session(sid):
     """Read only one session on demand; never scan the whole collection at boot."""
     if not firestore_enabled():
         return None
-    snapshot = _client().collection("survey_sessions").document(sid).get(timeout=FIRESTORE_TIMEOUT)
+    snapshot = _client().collection("survey_sessions").document(sid).get(retry=FIRESTORE_RETRY, timeout=FIRESTORE_TIMEOUT)
     return snapshot.to_dict() if snapshot.exists else None
 
 
@@ -144,14 +146,14 @@ def project_recent_sessions(limit=500):
 
 def persist_session_update(sid, values):
     if firestore_enabled():
-        _client().collection("survey_sessions").document(sid).set(values, merge=True, timeout=FIRESTORE_TIMEOUT)
+        _client().collection("survey_sessions").document(sid).set(values, merge=True, retry=FIRESTORE_RETRY, timeout=FIRESTORE_TIMEOUT)
     _backup("session.updated", {"id": sid, **values})
 
 
 def persist_skip(sid, qid, variables, reason, created_at):
     record={"question_id":qid,"variables":variables,"reason":reason,"created_at":created_at}
     if firestore_enabled():
-        _client().collection("survey_sessions").document(sid).update({f"skipped.{qid}":record}, timeout=FIRESTORE_TIMEOUT)
+        _client().collection("survey_sessions").document(sid).update({f"skipped.{qid}":record}, retry=FIRESTORE_RETRY, timeout=FIRESTORE_TIMEOUT)
     _backup("question.skipped", {"respondent_id":sid,**record})
 
 
@@ -159,7 +161,7 @@ def rollback_remote_answer(sid, qid):
     """Remove one answer and derived skips so the route can be calculated again."""
     if firestore_enabled():
         session=_client().collection("survey_sessions").document(sid)
-        session.update({f"answers.{qid}":firestore.DELETE_FIELD,"skipped":{}},timeout=FIRESTORE_TIMEOUT)
+        session.update({f"answers.{qid}":firestore.DELETE_FIELD,"skipped":{}},retry=FIRESTORE_RETRY,timeout=FIRESTORE_TIMEOUT)
     _backup("answer.rolled_back", {"respondent_id":sid,"question_id":qid})
 
 
