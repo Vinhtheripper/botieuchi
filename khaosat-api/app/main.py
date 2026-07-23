@@ -122,14 +122,17 @@ def start(body: Start):
     except ValueError:raise HTTPException(422,"Session ID không hợp lệ")
     existing=row("SELECT id FROM respondents WHERE id=?",(sid,))
     if existing:return {"id":sid,"replayed":True}
-    if firestore_enabled():
-        try:
-            if project_session(sid):return {"id":sid,"replayed":True}
-        except Exception:logger.exception("Không thể kiểm tra session %s",sid)
     created_at=body.started_at or now();name=participant_name(sid,body.name);record={"id":sid,"name":name,"email":body.email,"consent":bool(body.consent),"theme":"rose","started_at":created_at,"completed_at":None,"status":"active","manifest_version":body.manifest_version,"revision":0,"checkpoints":{},"answers":{},"skipped":{}}
-    try:persist_session(record)
+    try:
+        persist_session(record)
     except Exception:
-        if firestore_enabled() and project_session(sid):return {"id":sid,"replayed":True}
+        # UUID do client tạo gần như luôn là phiên mới. Chỉ đọc Firestore khi
+        # create báo trùng/lỗi để giữ idempotency sau cold start, tránh một
+        # network round-trip cho mọi người tham gia mới.
+        if firestore_enabled():
+            try:
+                if project_session(sid):return {"id":sid,"replayed":True}
+            except Exception:logger.exception("Không thể khôi phục session %s sau create thất bại",sid)
         raise
     with connect() as con: con.execute("INSERT OR IGNORE INTO respondents(id,name,email,consent,theme,started_at,status) VALUES(?,?,?,?,?,?,?)",(sid,name,body.email,int(body.consent),"rose",created_at,"active"))
     return {"id": sid,"replayed":False}
@@ -327,7 +330,7 @@ def answer(sid: str, body: Answer):
 
 @app.post("/api/sessions/{sid}/answers/batch")
 def answer_batch(sid:str,body:AnswerBatch):
-    if len(body.answers)>10:raise HTTPException(422,"Mỗi batch tối đa 10 câu trả lời")
+    if len(body.answers)>50:raise HTTPException(422,"Mỗi batch tối đa 50 câu trả lời")
     respondent=row("SELECT * FROM respondents WHERE id=?",(sid,))
     if not respondent and firestore_enabled():
         try: project_session(sid)

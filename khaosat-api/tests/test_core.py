@@ -70,6 +70,38 @@ class SurveySecurityTests(unittest.TestCase):
         self.assertEqual(result["accepted"],1)
         checkpoint.assert_called_once()
 
+    def test_whole_survey_can_sync_in_one_checkpoint(self):
+        with connect() as con:con.execute("INSERT OR REPLACE INTO settings VALUES('pilot_mode','true')")
+        sid=self.new_session();manifest=public_manifest();answers=[]
+        for question in manifest["questions"]:
+            option=question["options"][0]
+            answers.append(Answer(
+                question_id=question["id"],
+                option_id=option["id"],
+                value="Một checkpoint" if question["id"]=="P00" else None,
+                duration_ms=1200,
+            ))
+        with patch("app.main.commit_checkpoint",return_value={"replayed":False,"revision":1}) as checkpoint:
+            result=answer_batch(sid,AnswerBatch(
+                revision=1,
+                idempotency_key=f"{sid}:1:whole-survey",
+                answers=answers,
+            ))
+        self.assertEqual(result["accepted"],len(manifest["questions"]))
+        self.assertTrue(result["next"]["done"])
+        self.assertIn("profile",result["next"]["result"])
+        checkpoint.assert_called_once()
+        with connect() as con:con.execute("INSERT OR REPLACE INTO settings VALUES('pilot_mode','false')")
+
+    def test_batch_over_transport_limit_is_rejected(self):
+        sid=self.new_session()
+        with self.assertRaises(HTTPException) as raised:
+            answer_batch(sid,AnswerBatch(answers=[
+                Answer(question_id="P00",option_id="A",value="Quá giới hạn")
+                for _ in range(51)
+            ]))
+        self.assertEqual(raised.exception.status_code,422)
+
     def test_startup_does_not_scan_firestore(self):
         with patch("app.main.initialize_firebase"), patch("app.main.project_session") as lazy_loader:
             startup()

@@ -98,7 +98,7 @@ def run_form(index, base, manifest, metrics):
         if position is None:
             return {"index": index, "id": sid, "ok": False, "stage": "manifest", "question": question["id"]}
         batch = []
-        for candidate in ordered[position:position + 10]:
+        for candidate in ordered[position:position + 50]:
             options = candidate.get("options") or []
             if not options:
                 break
