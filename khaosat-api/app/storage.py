@@ -71,37 +71,26 @@ def persist_answer_batch(sid, records, session_updates=None):
 
 
 def commit_checkpoint(sid, records, session_updates, revision, idempotency_key):
-    """Commit a retry-safe client checkpoint in one Firestore transaction."""
+    """Commit a retry-safe checkpoint with one atomic Firestore document write.
+
+    Revision and replay checks are performed against the local projection by the
+    API route before this function is called. All answers, session metadata,
+    revision and the deterministic checkpoint marker are still written atomically
+    to the same Firestore document. Avoiding a read-before-write transaction
+    removes Firestore retry contention from the participant request path.
+    """
     if not firestore_enabled():
         return {"replayed": False, "revision": revision}
     ref = _client().collection("survey_sessions").document(sid)
-    transaction = _client().transaction()
-
-    @firestore.transactional
-    def commit(tx):
-        snapshot = ref.get(transaction=tx, timeout=FIRESTORE_TIMEOUT)
-        if not snapshot.exists:
-            raise KeyError(sid)
-        current = snapshot.to_dict() or {}
-        checkpoints = current.get("checkpoints") or {}
-        if idempotency_key in checkpoints:
-            return {"replayed": True, "revision": int(checkpoints[idempotency_key])}
-        current_revision = int(current.get("revision") or 0)
-        if revision != current_revision + 1:
-            raise ValueError(f"stale_revision:{current_revision}")
-        updates = {f'answers.{record["question_id"]}': record for record in records}
-        updates.update(session_updates or {})
-        updates["revision"] = revision
-        updates[f"checkpoints.{idempotency_key}"] = revision
-        tx.update(ref, updates)
-        return {"replayed": False, "revision": revision}
-
-    result = commit(transaction)
-    if not result["replayed"]:
-        for record in records:
-            _backup("answer.created", {"respondent_id": sid, **record})
-        _backup("checkpoint.committed", {"id": sid, "revision": revision, "idempotency_key": idempotency_key})
-    return result
+    updates = {f'answers.{record["question_id"]}': record for record in records}
+    updates.update(session_updates or {})
+    updates["revision"] = revision
+    updates[f"checkpoints.{idempotency_key}"] = revision
+    ref.update(updates, timeout=FIRESTORE_TIMEOUT)
+    for record in records:
+        _backup("answer.created", {"respondent_id": sid, **record})
+    _backup("checkpoint.committed", {"id": sid, "revision": revision, "idempotency_key": idempotency_key})
+    return {"replayed": False, "revision": revision}
 
 
 def load_session(sid):
