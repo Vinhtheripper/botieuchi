@@ -2,6 +2,7 @@
 """Delete survey responses while preserving admin/configuration data."""
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -20,13 +21,37 @@ def clear_local():
     with connect() as con:
         counts = {
             table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for table in ("respondents", "answers", "skipped", "question_timing")
+            for table in (
+                "respondents",
+                "answers",
+                "skipped",
+                "question_timing",
+                "sync_checkpoints",
+                "analytics_cache",
+            )
         }
+        con.execute("DELETE FROM analytics_cache")
+        con.execute("DELETE FROM sync_checkpoints")
         con.execute("DELETE FROM question_timing")
         con.execute("DELETE FROM skipped")
         con.execute("DELETE FROM answers")
         con.execute("DELETE FROM respondents")
+        con.execute("DELETE FROM sqlite_sequence WHERE name='answers'")
     return counts
+
+
+def clear_jsonl_backup():
+    path = Path(
+        os.getenv(
+            "JSONL_BACKUP_PATH",
+            Path(__file__).resolve().parents[1] / "backups" / "survey-events.jsonl",
+        )
+    ).expanduser()
+    previous_bytes = path.stat().st_size if path.exists() else 0
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    path.chmod(0o600)
+    return {"path": str(path), "deleted_bytes": previous_bytes}
 
 
 def clear_firestore():
@@ -47,7 +72,10 @@ def main():
     args = parser.parse_args()
     if not args.yes:
         raise SystemExit("Refusing destructive cleanup without --yes")
-    result = {"local_deleted": clear_local()}
+    result = {
+        "local_deleted": clear_local(),
+        "jsonl_backup": clear_jsonl_backup(),
+    }
     if not args.local_only:
         try:
             result["firestore"] = clear_firestore()
