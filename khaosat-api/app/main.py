@@ -84,7 +84,11 @@ def startup():
     if not row("SELECT value FROM settings WHERE key='last_import'"): import_workbook()
 
 @app.get("/api/health")
-def health(): return {"ok": True}
+def health():
+    return {
+        "ok": True,
+        "revision": os.getenv("RENDER_GIT_COMMIT", "local")[:7],
+    }
 
 class Login(BaseModel): username:str="admin"; password:str
 @app.post("/api/admin/login")
